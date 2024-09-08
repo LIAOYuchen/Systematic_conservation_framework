@@ -1,0 +1,589 @@
+---
+title: "Analysis 8: Comparison of PAs effectiveness inoptimal, random and reality scenarios"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+
+library(sf)
+library(terra)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+```
+
+# 1 Optimal optimization without considering existing PAs and land-use change
+
+```{r}
+
+in_Rdata <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/source_datasets_optimization.RData")
+load(in_Rdata);gc()
+
+in_folder <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/")
+
+path_df3 <- path_df_strategy[1,1]
+target <- 50
+scenario <- "scenario0"
+SSP_RCP <- "without_LUCC"
+    
+out_folder <- paste0(in_folder, scenario, "_target", target, "_",SSP_RCP,"//")
+out_final <- paste0(out_folder, "final_results//")
+out_process <- paste0(out_folder, "process_results//")  
+if(!file.exists(out_folder)){dir.create(out_folder, recursive = TRUE)}
+if(!file.exists(out_final)){dir.create(out_final, recursive = TRUE)}
+if(!file.exists(out_process)) {dir.create(out_process, recursive = TRUE)}
+
+if (length(list.files(out_final, "_final.rds$"))==0) {
+  log_file <- file(paste0(out_folder, scenario, "_", SSP_RCP, "_", target, ".log"), "a")
+  df3_PUs_mark <- readRDS(path_df3)
+  tmp_values <- ifelse(df3_PUs_mark$richness==1, -1, NA) %>% setNames(scenario)
+  
+  if (SSP_RCP!="without_LUCC") {
+    tmp_scenario <- df3_PUs_mark %>% select(matches(paste0("SSP")))
+    tmp_values <- ifelse(tmp_scenario==1, -1, tmp_values)
+  }
+  df3_PUs_mark <- df3_PUs_mark%>% 
+    mutate(scenario0 = as.numeric(tmp_values)) %>% 
+    select(matches(paste0("SSP|",scenario))) %>% 
+    setNames(c("LU_poten", "PUs_ID")) %>% 
+    mutate(PUs_ID_new = PUs_ID)
+
+  print(paste0("Start: ",scenario, "_", SSP_RCP, "_",target))
+  cat(paste0("Start: ",scenario, "_", SSP_RCP, "_",target, "\n"), file = log_file, append = TRUE)
+  
+  thre_law_sp <- df2_spinfo$gbif_name[df2_spinfo$threat_sp==1| df2_spinfo$law_sp==1]
+  priority_mat_occ <- as.numeric(df2_spinfo$priority_pixels) %>% 
+    as.matrix()
+  
+  if (scenario!="scenario1"|SSP_RCP!="without_LUCC") {
+    sel_PUs_unsu <- (df3_PUs_mark$PUs_ID==-1) & (!is.na(df3_PUs_mark$PUs_ID))
+    unsu_PUs_sp_matrix <-  df1_PUs_sp[sel_PUs_unsu,]
+    df2_spinfo$unsu_pixels <- colSums(unsu_PUs_sp_matrix)
+    rm(unsu_PUs_sp_matrix)
+  } else {
+    df2_spinfo$unsu_pixels <- 0
+  }
+  
+  
+  if (length(list.files(out_process))!=0) {
+    l <- 1
+    if (length(list.files(out_process))==1) {
+      i <- as.numeric(gsub(
+        paste0("optimization_",scenario,"_",SSP_RCP,"_",target,"_Iteration|\\.rds"),
+        "",list.files(out_process)))
+    } else {
+      i_first <- min(as.numeric(gsub(paste0("optimization_",scenario,"_",SSP_RCP,"_",target,"_Iteration|\\.rds"), "",list.files(out_process))))
+      n <- ceiling(i_first/100)
+      i <-  (length(list.files(out_process))-n)*100
+    }
+    rds_path <- list.files(out_process, paste0("Iteration",i,".rds"), full.names=T)
+    v_PUs <- readRDS(rds_path)
+    df3_PUs_mark$PUs_ID <- df3_PUs_mark$PUs_ID_new <- v_PUs
+    sel_PUs <- is.na(df3_PUs_mark$PUs_ID_new)
+    df_candidate_PUs <- df1_PUs_sp[sel_PUs,]
+    df1_PUs_sp <- path_df_scenario <- NULL; gc()
+  } else {
+    l=2
+    i=0
+    sel_PUs <- is.na(df3_PUs_mark$PUs_ID_new)
+    df_candidate_PUs <- df1_PUs_sp[sel_PUs,]
+    df1_PUs_sp <- path_df_scenario <- NULL; gc()
+  }
+  
+      
+
+  df_PUs_scores <- data.frame(matrix(NA, nrow = nrow(df_candidate_PUs),ncol=4))
+  colnames(df_PUs_scores) <- c("LU_weight","rank","PUs_score","PU_score")
+  rownames(df_PUs_scores) <- rownames(df_candidate_PUs)
+  df_PUs_scores$LU_weight <- (1-df3_PUs_mark$LU_poten[sel_PUs])
+  gc()
+  
+  if (l==1) {
+    sel_score <- is.na(df_PUs_scores$rank)
+    unsu_sp <- df2_spinfo$gbif_name[df2_spinfo$unsu_pixels == df2_spinfo$total_pixels]
+    covered_sp <- colnames(df_candidate_PUs)[!colnames(df_candidate_PUs)%in% unsu_sp]
+    cols_covered_sp <- which(colnames(df_candidate_PUs) %in% covered_sp)
+    mat_candidate_PUs_covered_sp  <- df_candidate_PUs[, cols_covered_sp] %>% as.matrix()
+    mat_priority_PUs_covered_sp <- priority_mat_occ[cols_covered_sp] %>% as.matrix()
+  
+    df_PUs_scores$PUs_score <- as.numeric(mat_candidate_PUs_covered_sp %*% mat_priority_PUs_covered_sp);gc()
+
+    mat_candidate_PUs_uc <- mat_candidate_PUs_covered_sp
+    total_pixel_covered_sp <- df2_spinfo$total_pixels[covered_sp]
+    for (c in 1:ncol(mat_candidate_PUs_uc)) {
+      tmp_rate <- mat_candidate_PUs_uc[,c]/total_pixel_covered_sp[c]
+      tmp_rate[tmp_rate<1] <- 0
+      tmp_rate[is.na(tmp_rate)] <- 0
+      mat_candidate_PUs_uc[,c] <- tmp_rate
+      if(c==1){
+        print("start protected more habitats")
+        cat("start protected more habitats \n", file = log_file, append = TRUE)
+      }
+      cat(c, "\r")
+    }
+    df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_uc);gc()
+    rm(mat_candidate_PUs_uc);gc()
+  
+    cover_tl_sp <- thre_law_sp[thre_law_sp %in% covered_sp]
+    cols_cover_tl_sp <- which(colnames(df_candidate_PUs) %in% cover_tl_sp)
+    mat_candidate_PUs_cover_tl  <- df_candidate_PUs[,cols_cover_tl_sp] %>% as.matrix()
+    mat_priority_PUs_cover_tl  <- priority_mat_occ[cols_cover_tl_sp] %>% as.matrix()
+    df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_cover_tl %*% mat_priority_PUs_cover_tl) %>% as.numeric()
+    rm(mat_candidate_PUs_cover_tl);rm(mat_priority_PUs_cover_tl)
+    rm(mat_candidate_PUs_covered_sp);rm(mat_priority_PUs_covered_sp);rm(priority_mat_occ)
+    gap_sp <- NULL
+    rm(df_candidate_PUs);gc()
+  }
+  gc()
+  prot_pixel <- sum(df3_PUs_mark$PUs_ID!=-1,na.rm = T)
+  target_pixel <- ceiling(nrow(df3_PUs_mark) * (target/100))
+  number_loops <- ceiling((target_pixel-prot_pixel))    
+  start.time <- Sys.time()
+  
+  for (l in 1:number_loops) {
+    if (prot_pixel <= target_pixel) {
+      
+      # default setting
+      loop.startime <- Sys.time()
+      i <- i+1
+
+      if (length(list.files(out_process))==0) {
+        sel_score <- is.na(df_PUs_scores$rank)
+
+        df_PUs_scores$PUs_score[!sel_score] <- df_PUs_scores$PU_score[!sel_score] <- 
+          df_PUs_scores$PUs_score_unique[!sel_score] <- df_PUs_scores$PUs_score_tl[!sel_score] <- NA
+        
+        df2_spinfo$nonProt_pixels <- colSums(df_candidate_PUs)
+        df2_spinfo$nonProt_unsu_pixels <- df2_spinfo$nonProt_pixels+df2_spinfo$unsu_pixels
+        gap_sp <- df2_spinfo$gbif_name[df2_spinfo$nonProt_unsu_pixels == df2_spinfo$total_pixels]
+        unsu_sp <- df2_spinfo$gbif_name[df2_spinfo$unsu_pixels == df2_spinfo$total_pixels]
+        gap_sp <- gap_sp[!gap_sp%in% unsu_sp]
+        cols_gap_sp <- which(colnames(df_candidate_PUs) %in% gap_sp)
+    
+        mat_candidate_PUs_gapsp <- df_candidate_PUs[,cols_gap_sp] %>% as.matrix()
+        mat_priority_PUs_gapsp <- priority_mat_occ[cols_gap_sp] %>% as.matrix()
+        df_PUs_scores$PUs_score[sel_score] <- as.numeric(mat_candidate_PUs_gapsp %*% mat_priority_PUs_gapsp);gc()
+        
+        mat_candidate_PUs_gu <- t(mat_candidate_PUs_gapsp)
+        mat_candidate_PUs_gu <- t(mat_candidate_PUs_gu/df2_spinfo$total_pixels[gap_sp])
+        mat_candidate_PUs_gu[mat_candidate_PUs_gu < 1] <- 0
+        mat_candidate_PUs_gu[is.na(mat_candidate_PUs_gu)] <- 0
+        
+        df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_gu);gc() 
+        rm(mat_candidate_PUs_gu)
+        
+        unpro_tl_sp <- thre_law_sp[thre_law_sp %in% gap_sp]
+        cols_unpro_tl_sp <- which(colnames(df_candidate_PUs) %in% unpro_tl_sp)
+        mat_candidate_PUs_gapsp_tl  <- df_candidate_PUs[,cols_unpro_tl_sp] %>% as.matrix()
+        mat_priority_PUs_gapsp_tl  <- priority_mat_occ[cols_unpro_tl_sp] %>% as.matrix()
+        df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_gapsp_tl %*% mat_priority_PUs_gapsp_tl) %>% as.numeric()
+        
+        if(length(gap_sp)==0){
+          saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_process, "optimization_",scenario, "_", SSP_RCP, "_",target,"_Iteration",i-1, ".rds"))
+        }          
+        if (length(list.files(out_process))==1) {
+          df_PUs_scores$PU_score <- NULL
+          df_PUs_scores$PUs_score <- df_PUs_scores$PUs_score_unique <- df_PUs_scores$PUs_score_tl <- NA
+          covered_sp <- colnames(df_candidate_PUs)[!colnames(df_candidate_PUs)%in% unsu_sp]
+          cols_covered_sp <- which(colnames(df_candidate_PUs) %in% covered_sp)
+          mat_candidate_PUs_covered_sp  <- df_candidate_PUs[, cols_covered_sp] %>% as.matrix()
+          mat_priority_PUs_covered_sp <- priority_mat_occ[cols_covered_sp] %>% as.matrix()
+
+          df_PUs_scores$PUs_score[sel_score] <- as.numeric(mat_candidate_PUs_covered_sp %*% mat_priority_PUs_covered_sp);gc()
+
+          mat_candidate_PUs_uc <- mat_candidate_PUs_covered_sp
+          total_pixel_covered_sp <- df2_spinfo$total_pixels[covered_sp]
+          for (c in 1:ncol(mat_candidate_PUs_uc)) {
+            tmp_rate <- mat_candidate_PUs_uc[,c]/total_pixel_covered_sp[c]
+            tmp_rate[tmp_rate<1] <- 0
+            tmp_rate[is.na(tmp_rate)] <- 0
+            mat_candidate_PUs_uc[,c] <- tmp_rate
+            if(c==1){
+              print("start protected more habitats")
+              cat("start protected more habitats \n", file = log_file, append = TRUE)
+            }
+            cat(c, "\r")
+          }
+          df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_uc);gc()
+          rm(mat_candidate_PUs_uc)
+
+          cover_tl_sp <- thre_law_sp[thre_law_sp %in% covered_sp]
+          cols_cover_tl_sp <- which(colnames(df_candidate_PUs) %in% cover_tl_sp)
+          mat_candidate_PUs_cover_tl  <- df_candidate_PUs[,cols_cover_tl_sp] %>% as.matrix()
+          mat_priority_PUs_cover_tl  <- priority_mat_occ[cols_cover_tl_sp] %>% as.matrix()
+          df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_cover_tl %*% mat_priority_PUs_cover_tl) %>% as.numeric()
+          rm(mat_candidate_PUs_cover_tl);rm(mat_priority_PUs_cover_tl)
+          rm(mat_candidate_PUs_covered_sp);rm(mat_priority_PUs_covered_sp);rm(priority_mat_occ)
+          rm(df_candidate_PUs)
+        }
+      }
+      
+      
+      if ((scenario!="scenario1") & (SSP_RCP=="all_SSPs_RCPs")) {
+        df_PUs_scores$PUs_score <- df_PUs_scores$PUs_score * df_PUs_scores$LU_weight
+        df_PUs_scores$PUs_score_unique <- df_PUs_scores$PUs_score_unique * df_PUs_scores$LU_weight
+        df_PUs_scores$PUs_score_tl <- df_PUs_scores$PUs_score_tl * df_PUs_scores$LU_weight
+      }
+      
+      sel_score <- is.na(df_PUs_scores$rank)   
+      max_score <- max(df_PUs_scores$PUs_score[sel_score])
+      sel_rows <- which(df_PUs_scores$PUs_score==max_score & is.na(df_PUs_scores$rank))
+      
+      if (length(sel_rows)==1) {
+        sel_PU <- rownames(df_PUs_scores)[sel_rows]
+      } else {
+        max_unique <- max(df_PUs_scores$PUs_score_unique[sel_rows])
+        ord_rows_unique <- which(df_PUs_scores$PUs_score_unique[sel_rows]==max_unique)
+        sel_rows_unique <- sel_rows[ord_rows_unique]
+        if (length(sel_rows_unique)==1) {
+          sel_PU <- rownames(df_PUs_scores)[sel_rows_unique]
+        } else {
+          ord_rows_tl <- which.max(df_PUs_scores$PUs_score_tl[sel_rows])
+          sel_rows_tl <- sel_rows[ord_rows_tl]
+          sel_PU <- rownames(df_PUs_scores)[sel_rows_tl]
+        }
+      }
+      
+      df3_PUs_mark$PUs_ID_new[rownames(df3_PUs_mark)==sel_PU] <- i
+      df_PUs_scores$rank[rownames(df_PUs_scores)==sel_PU] <- i
+      if(length(gap_sp)>0){df_candidate_PUs <- df_candidate_PUs[rownames(df_candidate_PUs)!=sel_PU,]}
+      prot_pixel <- sum(df3_PUs_mark$PUs_ID_new!=-1,na.rm = T)
+      tmp_sum <- sum(df_PUs_scores$PUs_score[sel_score], na.rm = T)
+      
+      if (length(gap_sp)==0){
+        if ((prot_pixel != target_pixel)){
+          if (i %% 100 == 0) {
+            df3_PUs_mark$PUs_ID_new[is.na(df3_PUs_mark$PUs_ID)] <- df_PUs_scores$rank
+            saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_process, "optimization_",scenario, "_", SSP_RCP, "_",target,"_Iteration",i, ".rds"))
+          }
+        } else if (prot_pixel == target_pixel|tmp_sum == 0 ) {
+          df3_PUs_mark$PUs_ID_new[is.na(df3_PUs_mark$PUs_ID)] <- df_PUs_scores$rank
+          saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_final, "optimization_",scenario, "_", SSP_RCP, "_",target,"_Iteration",i, "_final.rds"))
+        }
+      }
+      loop.endtime <- Sys.time()
+      if(length(gap_sp)>0){
+        cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:", 
+            tmp_sum, "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel,
+            "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "scenario:", scenario, "target:", target, "SSP_RCP:",SSP_RCP,"dim:",dim(df_candidate_PUs), "\r")
+        cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:", 
+            tmp_sum, "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel,
+            "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "scenario:", scenario, "target:", target, "SSP_RCP:",SSP_RCP,"dim:",dim(df_candidate_PUs), "\n",  file = log_file, append = TRUE)
+      } else {
+        cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:", tmp_sum , "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel, "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "scenario:", scenario, "target:", target, "SSP_RCP:",SSP_RCP, "\r")
+        cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:", tmp_sum , "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel, "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "scenario:", scenario, "target:", target, "SSP_RCP:",SSP_RCP, "\n",  file = log_file, append = TRUE)
+      }
+      if (tmp_sum==0){
+        next
+      }
+      gc()
+    }
+  }
+} else {
+  print(paste0("Done: ",scenario, "_", SSP_RCP, "_",target))
+}
+
+
+```
+
+# 2 Random optimization without considering existing PAs and land-use change (repeated 100 times)
+
+```{r}
+
+random_times <- 1:100
+target <- 50
+set.seed(20240513)
+
+df_template <- readRDS(paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds"))
+out_folder <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/Random_selection_target50_without_LUCC/")
+df_v_scenarios <- v_scenario <- rep(NA, length(df_template))
+
+if (length(list.files(out_folder))!=max(random_times)) {
+  tmp_sample <- v_scenario[is.na(v_scenario)]
+  No_target <- ceiling(length(df_v_scenarios) * (target/100))
+  for (r_time in random_times) {
+    out_rds <- paste0(out_folder, basename(out_folder),"_random_",r_time, ".rds")
+    if (!file.exists(paste0(out_rds))) {
+      my_each_random <- sample(length(tmp_sample))
+      final_random <- ifelse(my_each_random<= No_target, my_each_random, NA)
+      df_v_scenarios[is.na(v_scenario)] <- final_random 
+      saveRDS(df_v_scenarios, out_rds)
+      cat(gsub("\\.rds","",basename(out_rds)), "\r")
+    }
+  }
+}
+
+```
+
+# 3 Prepare the datasets combining three optimization scenarios
+
+scenario 1: Optimal optimization without considering existing PAs and land-use change
+scenario 2: Realistic optimization incorporates both existing PAs and land-use change (=optimization strategy2)
+scenario 3: Randomized optimization without considering land-use change (repeated 100 times)
+
+```{r}
+
+out_rds_binary <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_comparison_optimal_random_reality_binary.rds")
+out_rds <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_comparison_optimal_random_reality.rds")
+out_all <- c(out_rds_binary, out_rds)
+
+in_PUs_sp_binary <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+in_PUs_sp <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+
+if (sum(!file.exists(out_all))!=0) {
+  
+  folder_reality <- paste0(out_path,"result_4_conservation_optimiztion_our_method/")
+  path_reality <- list.files(list.files(list.files(folder_reality, "2_target50.*", full.names = T), 
+                                          "final_results$", full.names = T), ".rds$", full.names = T)
+  folder_optimal <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/scenario0_target50_without_LUCC/")
+  path_optimal <- list.files(paste0(folder_optimal, "final_results"), ".rds", full.names = T)
+  
+  folder_random <-  paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/Random_selection_target50_without_LUCC/")
+  path_random <- list.files(folder_random, full.names = T)
+  names_random <- gsub("Random_selection_target50_without_LUCC_|\\.rds",
+                            "",basename(path_random))
+  
+  path_all <- c(path_reality, path_optimal,path_random)
+  name_all <- c("reality", "optimal",names_random)
+   
+  df_all <- readRDS(path_all[1])
+  df_all <- matrix(NA, nrow=length(df_all))
+  for (i in 1:length(path_all)) {
+    tmp_path <- path_all[i]
+    tmp_name <- name_all[i]
+    tmp_df <- readRDS(tmp_path) %>% 
+      data.frame() %>% 
+      setNames(tmp_name)
+    df_all <- cbind(df_all, tmp_df)
+  }
+  if (sum(!file.exists(out_rds_binary))!=0) {
+    df_PUs_sp_binary <- readRDS(in_PUs_sp_binary)
+    df_all_binary <- df_all %>% 
+      select(-df_all) %>% 
+      cbind(., df_PUs_sp_binary)
+    saveRDS(df_all_binary, out_rds_binary)
+    rm(df_PUs_sp_binary);rm(df_all_binary)
+  }
+  if (sum(!file.exists(out_rds))!=0) {
+    df_PUs_sp <- readRDS(in_PUs_sp)
+    df_all <- df_all %>% 
+      select(-df_all) %>% 
+      cbind(., df_PUs_sp)
+    saveRDS(df_all, out_rds)
+    rm(df_PUs_sp);rm(df_all)
+  }
+}
+      
+```
+
+# 4 Prepare the datasets to compare the effectiveness in covered species under three scenarios
+
+```{r}
+
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+  pull(gbif_name);gc()
+in_rds <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_comparison_optimal_random_reality_binary.rds")
+df_sp <- readRDS(in_rds);gc()
+df_info <- df_sp %>% 
+  select(-all_of(gbif_name))
+df_sp <- df_sp %>% select(all_of(gbif_name));gc()
+df_out <- data.frame(prop_area = seq(0,60,by=0.01))
+
+out_rds <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_number_covered_species_optimal_random_reality.rds")
+Total_counts <- nrow(df_sp)
+
+if(!file.exists(out_rds)) {
+  all_names <- colnames(df_info)
+  for (tmp_n in 1:length(all_names)) {
+    tmp_col <- all_names[tmp_n]
+    tmp_df <- df_info %>%
+      select(all_of(tmp_col)) %>% 
+      setNames("scenario") %>% 
+      cbind(.,df_sp) %>% 
+      filter(!scenario==-1&!is.na(scenario)) %>% 
+      arrange(scenario) %>% 
+      mutate(rank_sce = rank(scenario, ties.method = "max"),
+             prop_area = round(rank_sce/nrow(df_sp)*100,2)) %>% 
+      select(prop_area,everything(),-rank_sce,-scenario) %>%
+      group_by(prop_area) %>% 
+      summarize(across(everything(),~sum(.x, na.rm = TRUE)))
+    
+    gc()
+    
+    tmp_prop_area <- tmp_df %>% select(prop_area)
+    tmp_df <- tmp_df %>% select(-prop_area) 
+    max_richness <- sum(colSums(tmp_df,na.rm=T)!=0)
+    richness <- c()
+    for(tmp_r in 1:nrow(tmp_df)){
+      tmp_df_sp <- tmp_df[1:tmp_r,]
+      tmp_colsum <- colSums(tmp_df_sp,na.rm=T)!=0;rm(tmp_df_sp)
+      tmp_richness <- sum(tmp_colsum)
+      richness <- c(richness, tmp_richness)
+      gc()
+      cat(paste0(tmp_n,"/", length(all_names),
+                 "; - ",tmp_r," - ", nrow(tmp_df), 
+                 "; ",tmp_richness, "- ",max_richness,
+                 "; scenario: ", tmp_col,"\r"))
+      if(tmp_richness==max_richness){
+        break
+      }
+    }
+    gc();rm(tmp_df)
+    df_prop_area <- data.frame(prop_area=tmp_prop_area$prop_area[1:length(richness)],
+                           richness=richness) %>% 
+      merge(.,tmp_prop_area,all.y=T) %>% 
+      mutate(richness=ifelse(is.na(richness), max(richness,na.rm = T), richness)) %>% 
+      setNames(c("prop_area", tmp_col))
+    gc();rm(tmp_prop_area)
+    df_out <- 
+      merge(df_out,df_prop_area,by="prop_area",all.x=T) 
+  }
+  saveRDS(df_out, out_rds)
+}
+
+```
+
+# 5 Prepare the datasets to compare the effectiveness in covered habitat under three scenarios
+
+```{r}
+
+in_rds <-  paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_comparison_optimal_random_reality.rds")
+in_PUs_sp <-  paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+my_break <- 0.2
+out_rds <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/effectiveness_prop_covered_habitat_optimal_random_reality_freq_break",my_break,".rds")
+
+if (!file.exists(out_rds)) {
+  
+  ras_PAs <- rast(paste0(in_path, "PAs_coverage/PAs_ID_dynamic.tif"))
+  shp_PAs <- st_read(paste0(in_path, "PAs_coverage/PAs_categories_info.shp")) %>% 
+    st_drop_geometry(.) %>% 
+    select(OBJECTID, Year) %>% 
+    setNames(c("ID_PAs", "Year"))
+  
+  v_PAs <- values(ras_PAs) %>% 
+    data.frame() %>% 
+    filter(!is.na(.)) %>% 
+    setNames("ID_PAs") %>% 
+    mutate(ID=1:nrow(.),
+           No_pixel =1,
+           ID_PAs = ifelse(ID_PAs<200, ID_PAs, ID_PAs-200)) %>% 
+    merge(., shp_PAs, by="ID_PAs", all=T) %>% 
+    arrange(Year) %>% 
+    mutate(rank=ifelse(!is.na(Year),1:length(!is.na(Year)),NA)) %>% 
+    arrange(ID)
+  
+  df_PAs <- values(ras_PAs) %>% 
+    data.frame() %>% 
+    filter(!is.na(.)) %>% 
+    setNames("ID_PAs") %>% 
+    mutate(No_pixel =1,
+           ID_PAs = ifelse(ID_PAs<200, ID_PAs, ID_PAs-200)) %>% 
+    group_by(ID_PAs) %>% 
+    summarize(across(everything(), sum)) %>% 
+    filter(ID_PAs!=0) %>%  
+    merge(., shp_PAs, by="ID_PAs", all=T) %>% 
+    group_by(Year) %>% 
+    summarize(across(No_pixel, sum)) %>%
+    mutate(Sum_pixel=cumsum(No_pixel))
+  
+  df_sel <- df_PAs %>% 
+    filter(grepl("1963|1983|2003|2021",Year)) %>% 
+    pull(Sum_pixel) %>% 
+    c(.,ceiling(nrow(v_PAs)*0.3),
+               ceiling(nrow(v_PAs)*0.5))
+  
+  gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+    pull(gbif_name)
+  df_sp <- readRDS(in_rds);gc()
+  
+  df_info <- df_sp %>% 
+    select(-all_of(gbif_name))
+  
+  my_scenario <- c("year_1963","year_1983", "year_2003",
+                   "year_2023","year_2030", "year_2050")
+  
+  which_rows <- which(df_info$reality>0)
+  v_scenario2 <- df_info$reality[which_rows]+max(v_PAs$rank,na.rm = T)
+  df_info$reality[which_rows] <- v_scenario2
+  which_rows <- which(df_info$reality==0)
+  df_info$reality[which_rows] <- v_PAs$rank[which_rows]
+  
+  sel_NA <- intersect(which(df_sp$optimal==-1),
+                      which(df_sp$reality==-1));gc()
+  
+  if (length(sel_NA)!=0) {
+    df_sp <- df_sp[-sel_NA,]
+    df_info <- df_info[-sel_NA,]
+  }
+  
+  df_sp <- df_sp %>% select(all_of(gbif_name));gc()
+  df_stat <- data.frame(gbif_name = gbif_name,
+                       SC_pixel = colSums(df_sp, na.rm = T));gc()
+  rownames(df_stat) <- NULL
+  
+  all_names <- colnames(df_info)
+  for (tmp_n in 1:length(all_names)) {
+    tmp_col <- all_names[tmp_n]
+    tmp_df <- df_info %>%
+      select(all_of(tmp_col)) %>% 
+      setNames("scenario") %>% 
+      cbind(.,df_sp) %>% 
+      filter(!scenario==-1&!is.na(scenario)) %>% 
+      arrange(scenario)
+    my_sel <- df_sel
+    for (tmp_s in 1:length(my_sel)) {
+      tmp_sel <- my_sel[tmp_s]
+      tmp_scenario <- my_scenario[tmp_s]
+      tmp_sel_df <- tmp_df %>% 
+        filter(scenario<=tmp_sel) %>% 
+        select(-scenario)
+      tmp_colsums <- colSums(tmp_sel_df, na.rm = T)
+      df_stat <- df_stat %>% 
+        mutate(!!paste0(tmp_col,"_",tmp_scenario):=tmp_colsums);gc()
+      cat(paste0(tmp_n,"/", length(all_names),
+                 "; - ",tmp_s," - ", length(my_sel),
+                 "; PAs scenario: ", "- ",tmp_scenario,
+                 "; scenario: ", tmp_col,"\r"))
+    }
+  }
+  
+  df_stat_info <- df_stat %>% 
+    select(gbif_name,SC_pixel)
+  df_stat_prop <- df_stat %>% 
+    select(-gbif_name,-SC_pixel)/df_stat_info$SC_pixel
+  df_stat_prop <- cbind(df_stat_info,df_stat_prop)
+  
+  tmp_df_sp <- df_stat_prop %>% 
+      select(-gbif_name,-SC_pixel)
+    
+  tmp_plot_df <- data.frame(prop = NA, group = NA, count = NA)
+
+  for (j in colnames(tmp_df_sp)) {
+    tmp_count <- NULL
+    for (tmp_b in seq(0, 1, my_break)) {
+      tmp_b_count <- sum(tmp_df_sp[,j] >=tmp_b)
+      tmp_count <- c(tmp_count, tmp_b_count)
+    }
+    tmp_plot_df_j <- data.frame(
+      prop = seq(0, 1, my_break),
+      group = rep(j, length(seq(0, 1, my_break))),
+      count = tmp_count)
+    tmp_plot_df <- rbind(tmp_plot_df, tmp_plot_df_j)
+  }
+      
+  tmp_plot_df <- tmp_plot_df[-1,] %>% 
+    setNames(c("Prop","group", "count")) %>%          
+    `rownames<-`(1:nrow(.)) 
+  
+  saveRDS(tmp_plot_df, out_rds)
+}
+
+```

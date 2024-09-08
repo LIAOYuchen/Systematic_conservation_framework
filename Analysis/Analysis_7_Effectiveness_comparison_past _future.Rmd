@@ -1,0 +1,546 @@
+---
+title: "Analysis 7: Comparison of PAs effectiveness: Past vs. Future"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(sf)
+library(terra)
+library(dplyr)
+library(stringr)
+
+```
+
+# 1 Prepare datasets to analyze conservation effectiveness in the past and future
+
+```{r}
+
+out_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/comparison_effectiveness_past_future.rds")
+
+if (!file.exists(out_rds)) {
+  
+  shp_PAs <- st_read(paste0(in_path, "PAs_coverage/PAs_categories_info.shp"))
+  ras_PAs <- rast(paste0(in_path, "PAs_coverage/PAs_ID_dynamic.tif"))
+  ras_panda <- rast(paste0(in_path, "panda_info/Ailuropoda melanoleuca.tif"))
+  df_PUs_sp <- readRDS(paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds"));gc()
+   
+  df_shp_PAs <- st_drop_geometry(shp_PAs) %>% 
+    select(OBJECTID, type, Year) %>% 
+    setNames(c("ID_NRs", "Type", "Year"))
+  
+  df_PAs <- values(ras_PAs) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("ID_PAs") %>% 
+    mutate(ID=1:nrow(.))
+  
+  df_PAs_refined <- df_PAs %>% 
+    group_by(ID_PAs) %>% 
+    summarize() %>% 
+    ungroup() %>% 
+    mutate(ID_NRs=ifelse(ID_PAs>=200, ID_PAs-200, ID_PAs),
+           ID_NP = ifelse(ID_PAs>=200, 167, NA)) %>% 
+    filter(ID_NRs!=0) %>% 
+    merge(., df_shp_PAs, by="ID_NRs", all=T) %>% 
+    select(ID_PAs, ID_NRs, ID_NP, Type, Year) %>% 
+    arrange(ID_PAs)
+  
+  df_PAs_info <- merge(df_PAs, df_PAs_refined, all.x=T) %>% 
+    arrange(ID) %>% 
+    select(-ID)
+    
+  df_panda <- values(ras_panda) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("panda")
+  
+  df_richness <- data.frame(richness=rowSums(df_PUs_sp)!=0)
+  df_all <- cbind(df_richness, df_PAs_info, df_panda, df_PUs_sp)
+  
+  my_folder <- paste0(out_path, "result_4_conservation_optimiztion_our_method/")
+  path_strategies <- list.files(list.files(list.files(my_folder, full.names = T), "final_results", full.names = T), ".*all.*50.*rds$", full.names = T)
+  
+  df_strategies <- matrix(NA, nrow=nrow(df_all), ncol=1)
+  for (i in 1:length(path_strategies)) {
+    tmp_path <- path_strategies[i]
+    tmp_name <- str_extract(tmp_path, "strategy\\d+")
+    tmp_df <- readRDS(tmp_path) %>% 
+      data.frame() %>% 
+      setNames(tmp_name)
+    df_strategies <- cbind(df_strategies, tmp_df)
+  }
+  df_strategies <- df_strategies %>% 
+    select(-df_strategies) %>% 
+    cbind(., df_all)
+  saveRDS(df_strategies, out_rds)
+}
+
+path_strategies <- paste0(out_path, "result_7_effectiveness_comparison_past_future/comparison_effectiveness_past_future.rds")
+
+df_strategies <-  readRDS(path_strategies)
+total_PUs <- nrow(df_strategies)
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+  pull(gbif_name)
+sel_rows <- which(df_strategies$strategy1==0)
+df_strategies$strategy3[sel_rows] <- 0
+col_strategies <- paste0("strategy", 1:3)
+
+length_out <- length(list.files(paste0(out_path, "result_7_effectiveness_comparison_past_future/"),
+           "panda_limitated_conservation.*rds$", full.names = T))
+
+if (length_out!=(2*length(col_strategies))) {
+  for (tmp_strategy in col_strategies) {
+    tmp_rds <- df_strategies %>% 
+      select(-matches("strategy"),all_of(tmp_strategy)) %>%
+      select(all_of(tmp_strategy),everything()) %>% 
+      rename(strategy := !!tmp_strategy) %>%       
+      filter(strategy!=-1) %>% 
+      filter(!is.na(strategy)) 
+    
+    PUs_info <- colnames(tmp_rds)[!colnames(tmp_rds) %in% gbif_name];gc() 
+    
+    out_covered <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_covered_species.rds")
+    out_endemic <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_endemic_species.rds")
+    out_all <- c(out_covered, out_endemic)
+    
+    if (sum(!file.exists(out_all))!=0) {
+      if (!file.exists(out_covered)) {
+        df_panda <- tmp_rds %>%
+          filter(panda==1|strategy==0);gc()
+        df_panda_sp <- df_panda %>%
+          filter(panda==1) %>%
+          select(all_of(gbif_name))
+        sum_panda_sp <- colSums(df_panda_sp)>0
+        table(sum_panda_sp)
+        list_covered_sp <- colnames(df_panda_sp)[sum_panda_sp]
+        rm(df_panda_sp)
+  
+        df_panda <- df_panda %>%
+          select(all_of(c(PUs_info,list_covered_sp)))
+        
+        tmp_panda_sp <- df_panda %>% 
+          arrange(strategy, Year) %>% 
+          mutate(my_rank = rank((strategy), ties.method = "max"),
+                 count_pixel=1) %>% 
+          select(count_pixel, my_rank, strategy, everything()) %>% 
+          arrange(my_rank)
+        rm(df_panda);gc()
+        
+        tmp_panda_sp_p1 <- tmp_panda_sp %>%
+          select(-matches("^ID"),-Type) %>% 
+          group_by(Year) %>% 
+          summarize(across(c(my_rank), first),
+                    across(everything(), sum)) %>% 
+          filter(!is.na(Year)) %>% 
+          arrange(Year);gc()
+        
+        tmp_panda_sp_p2 <- tmp_panda_sp %>% 
+          select(colnames(tmp_panda_sp_p1))  %>% 
+          filter(is.na(Year)) %>% 
+          group_by(my_rank) %>% 
+          summarize(across(c(Year), first),
+                    across(everything(), sum)) %>% 
+          select(colnames(tmp_panda_sp_p1)) %>% 
+          arrange(my_rank);gc()
+        
+        tmp_panda_sp_new <- rbind(tmp_panda_sp_p1, tmp_panda_sp_p2) %>% 
+          mutate(acc_entire=ifelse(strategy==0,cumsum(count_pixel), strategy+min(my_rank)),
+                 acc_panda=cumsum(panda),
+                 prop_panda = (acc_panda/acc_entire)*100,
+                 prop_target = (acc_entire/total_PUs)*100) %>% 
+          select(prop_target,prop_panda,acc_entire,acc_panda,everything())
+        rownames(tmp_panda_sp_new) <- 1:nrow(tmp_panda_sp_new)
+        gc();rm(tmp_panda_sp_p1);rm(tmp_panda_sp_p2)
+        
+        df_info <- tmp_panda_sp_new %>% 
+          select(-(all_of(list_covered_sp))) %>% 
+          mutate(Year_rank = ifelse(!is.na(Year), paste0(Year,"_", my_rank), my_rank))
+        rm(tmp_panda_sp_new)
+  
+        tmp_panda_sp_p1_new <- tmp_panda_sp %>%
+          mutate(acc_count =cumsum(count_pixel)) %>% 
+          select(acc_count, everything()) %>% 
+          filter(panda==1) %>% 
+          select(-matches("^ID"),-Type) %>% 
+          group_by(Year) %>% 
+          summarize(across(c(my_rank), first),
+                    across(c(acc_count),max),
+                    across(everything(), sum)) %>% 
+          filter(!is.na(Year)) %>% 
+          select(Year,my_rank, all_of(list_covered_sp)) %>% 
+          arrange(Year);gc()
+        
+        tmp_panda_sp_p2_new <- tmp_panda_sp %>%
+          filter(panda==1) %>% 
+          filter(is.na(Year)) %>% 
+          select(colnames(tmp_panda_sp_p1_new)) %>% 
+          arrange(my_rank);gc()
+        rm(tmp_panda_sp)
+        
+        tmp_panda_sp_new2 <- rbind(tmp_panda_sp_p1_new, tmp_panda_sp_p2_new) %>% 
+          mutate(Year_rank = ifelse(!is.na(Year), paste0(Year,"_", my_rank), my_rank)) %>% 
+          select(Year_rank,everything(),-Year,-my_rank)
+        rownames(tmp_panda_sp_new2) <- 1:nrow(tmp_panda_sp_new2) 
+        rm(tmp_panda_sp_p1_new);rm(tmp_panda_sp_p2_new)
+        
+        df_panda_sp_new <- merge(tmp_panda_sp_new2, df_info, by="Year_rank", all=T) %>% 
+          select(colnames(df_info), everything()) %>% 
+          arrange(Year,my_rank) %>% 
+          mutate(Year_rank = ifelse(panda==0,NA,Year_rank))
+        rownames(df_panda_sp_new) <- 1:nrow(df_panda_sp_new)
+        gc();rm(tmp_panda_sp_new2);rm(df_info)
+        
+        saveRDS(df_panda_sp_new, out_covered)
+        rm(df_panda_sp_new)
+      }
+      
+      if (!file.exists(out_endemic)) {
+                
+        tmp_all_sp <- tmp_rds %>% 
+          mutate(panda_label = ifelse(panda==1|strategy==0,1,0)) %>% 
+          select(panda_label, everything()) %>% 
+          arrange(strategy, Year) %>% 
+          mutate(my_rank = rank((strategy), ties.method = "max"),
+                 count_pixel=1) %>% 
+          select(panda_label, count_pixel, my_rank, strategy, everything()) %>% 
+          arrange(my_rank);gc()
+        rownames(tmp_all_sp) <- 1:nrow(tmp_all_sp)
+        
+        
+        tmp_all_sp_p1 <- tmp_all_sp %>%
+          select(-matches("^ID"),-Type) %>% 
+          group_by(Year) %>% 
+          summarize(across(c(my_rank), first),
+                    across(everything(), sum)) %>% 
+          filter(!is.na(Year));gc()
+        
+        tmp_all_sp_p2 <- tmp_all_sp %>% 
+          select(colnames(tmp_all_sp_p1))  %>% 
+          filter(is.na(Year));rm(tmp_all_sp)
+        
+        tmp_all_sp_p2_sel <- tmp_all_sp_p2 %>% 
+          select(panda_label,strategy) %>% 
+          mutate(group= ifelse(is.na(strategy),NA,panda_label*strategy),
+                 panda_label=ifelse(strategy>max(group,na.rm=T),NA,panda_label),
+                 group=ifelse(is.na(panda_label),NA,group))
+        
+        sel_rows <- which((tmp_all_sp_p2_sel$group>0) & (!is.na(tmp_all_sp_p2_sel$group)))
+        value_groups <- tmp_all_sp_p2_sel$group[sel_rows] %>% data.frame()
+        for (tmp_r in 1:length(sel_rows)) {
+          r_current <- sel_rows[tmp_r]
+          if(tmp_r==1){
+            r_previous <- 0+1
+          } else {
+            r_previous <- sel_rows[tmp_r-1]+1
+          }
+          tmp_all_sp_p2_sel$group[r_previous:r_current] <- r_current
+        }
+        gc()
+        tmp_all_sp_p2_sel <- tmp_all_sp_p2_sel %>% 
+          mutate(group=ifelse(strategy>max(group,na.rm=T),strategy,group))
+        
+        tmp_all_sp_p2_new <- cbind(group=tmp_all_sp_p2_sel$group,
+                                          tmp_all_sp_p2) %>% 
+          group_by(group) %>% 
+          summarize(across(c(Year,my_rank,strategy), last),
+                    across(everything(), sum)) %>% 
+          select(colnames(tmp_all_sp_p1))
+        gc();rm(tmp_all_sp_p2);rm(tmp_all_sp_p2_sel)
+        
+        tmp_all_sp_new <- rbind(tmp_all_sp_p1, tmp_all_sp_p2_new) %>%
+          mutate(acc_entire=ifelse(strategy==0,cumsum(count_pixel), strategy+min(my_rank)),
+                 acc_panda=cumsum(panda),
+                 prop_panda = (acc_panda/acc_entire)*100,
+                 prop_target = (acc_entire/total_PUs)*100) %>%
+          select(prop_target,prop_panda,acc_entire,acc_panda,everything());gc()
+        rm(tmp_all_sp_p1);rm(tmp_all_sp_p2_new)
+        saveRDS(tmp_all_sp_new, out_endemic)
+        
+        gc();rm(tmp_all_sp_new)
+      }          
+    };rm(tmp_rds)
+  };rm(df_strategies)
+}
+
+
+```
+
+# 2 Prepare datasets to compare the change in conservation effectiveness in number of covered species
+
+```{r}
+
+# limited umbrella effect of giant panda
+
+col_strategies <- paste0("strategy", 1:3)
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+  pull(gbif_name);gc()
+
+for (tmp_strategy in col_strategies) {
+  in_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_covered_species.rds")
+  out_rds <- gsub(tmp_strategy,paste0(tmp_strategy,"_number"), in_rds)
+  
+  if (!file.exists(out_rds)) {
+    df_panda <- readRDS(in_rds);gc()
+    list_covered_sp <- colnames(df_panda)[colnames(df_panda) %in% gbif_name]
+    df_info <- df_panda %>% 
+      select(-all_of(list_covered_sp));gc()
+    df_sp <- df_panda %>% 
+      select(all_of(list_covered_sp)) %>% 
+      vegan::decostand(.,method="pa");gc()
+    df_panda_sp <- df_info %>% 
+      mutate(Index1_Number=NA);gc()
+    for (tmp_r in 1:nrow(df_sp)) {
+      tmp_df_sp <- df_sp[1:tmp_r,]
+      tmp_strategysums <- colSums(tmp_df_sp,na.rm = T)
+      tmp_richness <- sum(tmp_strategysums!=0)
+      df_panda_sp$Index1_Number[tmp_r] <- tmp_richness
+      cat(paste0(tmp_strategy, " - covered species - ", tmp_r, " - ", nrow(df_sp),"\r"))
+    };gc()
+    saveRDS(df_panda_sp, out_rds)
+  }
+}
+
+
+# beyond umbrella effect of giant panda
+
+col_strategies <- paste0("strategy", 1:3)
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+  pull(gbif_name);gc()
+
+for (tmp_strategy in col_strategies) {
+  in_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_endemic_species.rds")
+  out_rds <- gsub(tmp_strategy,paste0(tmp_strategy,"_number"), in_rds)
+  if (!file.exists(out_rds)) {
+    df_all <- readRDS(in_rds);gc()
+    df_info <- df_all %>% 
+      select(-all_of(gbif_name))
+    df_sp <- df_all %>% 
+      select(all_of(gbif_name)) %>% 
+      vegan::decostand(.,method="pa");gc()
+    df_all_sp <- df_info %>% 
+      mutate(Index1_Number=NA)
+    for (tmp_r in 1:nrow(df_sp)) {
+      tmp_df_sp <- df_sp[1:tmp_r,]
+      tmp_strategysums <- colSums(tmp_df_sp)
+      tmp_richness <- sum(tmp_strategysums!=0)
+      df_all_sp$Index1_Number[tmp_r] <- tmp_richness
+      cat(paste0(tmp_strategy, " - all endemic species - ", tmp_r, " - ", nrow(df_sp),"\r"))
+    };gc()
+    saveRDS(df_all_sp, out_rds)
+  }
+}
+
+
+# change of PAs effectiveness in the past and future
+
+col_strategies <- paste0("strategy", 1:3)
+col_types <- c("covered_species","endemic_species")
+in_template <- paste0(out_path, "result_7_effectiveness_comparison_past_future/",col_strategies[1],"_number_panda_limitated_conservation_",col_types[1],".rds")  
+
+tmp_df <- readRDS(in_template) %>% mutate(group=NA)
+tmp_df <- tmp_df[0,]
+out_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/compare_effectiveness_on_number_covered_species_past_future.rds")
+if(!file.exists(out_rds)){
+  for (tmp_type in col_types) {
+    for (tmp_strategy in col_strategies) {
+      
+      in_rds <- paste0(out_path,                       "result_7_effectiveness_comparison_past_future/",tmp_strategy,"_number_panda_limitated_conservation_",tmp_type,".rds")
+      df_rds <- readRDS(in_rds) %>% 
+        mutate(group=paste0(tmp_type,"_", tmp_strategy),
+             Year_rank = ifelse(!is.na(Year), paste0(Year,"_", my_rank), my_rank)) %>%
+        select(colnames(tmp_df))
+      tmp_df <- rbind(tmp_df, df_rds)
+    
+    }
+  }
+  saveRDS(tmp_df, out_rds);rm(tmp_df)
+}
+
+```
+
+# 3 Prepare datasets to compare the change in conservation effectiveness in the proportion of habitat coverage
+
+```{r}
+
+# limited umbrella effect of giant panda
+
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+  pull(gbif_name);gc()
+out_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/strategies_proportion_panda_limitated_conservation_covered_species.rds")
+
+if (!file.exists(out_rds)) {
+  
+  in_tmp <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", col_strategies[1],"_panda_limitated_conservation_covered_species.rds")
+
+  df_tmp <- readRDS(in_tmp) %>% 
+    mutate(round_target = round(prop_target,2),
+           label_top = ifelse(Year==2021, "Current", NA),
+           label_top = ifelse(round(prop_target,2) == 30, "Top30", label_top),
+           label_top = ifelse(prop_target == max(prop_target,na.rm = T), 
+                              "Top50", label_top)) %>% 
+    select(round_target,label_top, everything());gc()
+  list_covered_sp <- colnames(df_tmp)[colnames(df_tmp) %in% gbif_name]
+  
+  df_tmp_sp <- df_tmp %>% 
+    select(all_of(list_covered_sp));gc()
+  rows_labels <- which(!is.na(df_tmp$label_top))
+  my_labels <- df_tmp$label_top[rows_labels]
+  df_panda_sp <- data.frame(gbif_name=list_covered_sp,
+                            matrix(NA, nrow=ncol(df_tmp_sp), 
+                                       ncol=length(rows_labels)*length(col_strategies))) %>%
+    setNames(c("gbif_name",paste0(rep(col_strategies,each=length(rows_labels)), "_",
+                    rep(my_labels, times=length(col_strategies)))))
+  
+  for (tmp_strategy in col_strategies) {
+    in_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_covred_species.rds")
+    df_panda <- readRDS(in_rds) %>% 
+    mutate(round_target = round(prop_target,2),
+           label_top = ifelse(Year==2021, "Current", NA),
+           label_top = ifelse(round(prop_target,2) == 30, "Top30", label_top),
+           label_top = ifelse(prop_target == max(prop_target,na.rm = T), "Top50", label_top)) %>% 
+    select(round_target,label_top, everything());gc()
+    df_sp <- df_panda %>% 
+      select(all_of(list_covered_sp));gc()
+    cat(paste0(tmp_strategy, " - covred species", "\n"))
+    for (i in 1:length(rows_labels)) {
+      tmp_r <- rows_labels[i]
+      my_label <- my_labels[i]
+      tmp_df_sp <- df_sp[1:tmp_r,]
+      tmp_strategysums <- colSums(tmp_df_sp,na.rm = T)
+      df_panda_sp[,paste0(tmp_strategy, "_", my_label)] <- tmp_strategysums
+      cat(paste0(tmp_strategy, " - covred species - ", i, " - ", length(rows_labels),"\r"))
+    };gc()
+  }
+  saveRDS(df_panda_sp, out_rds)
+}
+
+
+# beyond umbrella effect of giant panda
+
+col_strategies <- paste0("strategy", 1:3)
+gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>%
+  pull(gbif_name);gc()
+out_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/strategies_proportion_panda_limitated_conservation_endemic_species.rds")
+
+if (sum(!file.exists(out_rds))!=0) {
+  
+  in_tmp <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", col_strategies[1],"_panda_limitated_conservation_endemic_species.rds")
+
+  df_tmp <- readRDS(in_tmp) %>% 
+    mutate(round_target = round(prop_target,2),
+           label_top = ifelse(Year==2021, "Current", NA),
+           label_top = ifelse(round(prop_target,2) == 30, "Top30", label_top),
+           label_top = ifelse(prop_target == max(prop_target,na.rm = T),
+                              "Top50", label_top)) %>% 
+    select(round_target,label_top, everything());gc()
+  
+  list_covered_sp <- colnames(df_tmp)[colnames(df_tmp) %in% gbif_name]
+  df_tmp_sp <- df_tmp %>% 
+    select(all_of(list_covered_sp));gc()
+  rows_labels <- which(!is.na(df_tmp$label_top))
+  my_labels <- df_tmp$label_top[rows_labels]
+  df_all_sp <- data.frame(gbif_name=list_covered_sp,
+                            matrix(NA, nrow=ncol(df_tmp_sp), 
+                                       ncol=length(rows_labels)*length(col_strategies))) %>% 
+    setNames(c("gbif_name",paste0(rep(col_strategies,each=length(rows_labels)), "_",
+                    rep(my_labels, times=length(col_strategies))))) 
+
+  for (tmp_strategy in col_strategies) {
+    cat(paste0(tmp_strategy, " - all endemic species", "\n"))
+    
+    in_tmp <- paste0(out_path, "result_7_effectiveness_comparison_past_future/", tmp_strategy,"_panda_limitated_conservation_endemic_species.rds")
+    df_all <- readRDS(in_rds) %>% 
+      mutate(round_target = round(prop_target,2),
+             label_top = ifelse(Year==2021, "Current", NA),
+             label_top = ifelse(round(prop_target,2) == 30, "Top30", label_top),
+             label_top = ifelse(prop_target == max(prop_target,na.rm = T), "Top50", label_top)
+             ) %>% 
+      select(round_target,label_top, everything());gc()
+    df_info <- df_all %>% 
+      select(-all_of(list_covered_sp));gc()
+    df_sp <- df_all %>% 
+      select(all_of(list_covered_sp));gc()
+    for (i in 1:length(rows_labels)) {
+      tmp_r <- rows_labels[i]
+      my_label <- my_labels[i]
+      tmp_df_sp <- df_sp[1:tmp_r,]
+      tmp_strategysums <- colSums(tmp_df_sp,na.rm = T)
+      df_all_sp[,paste0(tmp_strategy, "_", my_label)] <- tmp_strategysums
+      cat(paste0(tmp_strategy, " - all endemic species - ", i, " - ", length(rows_labels),"\r"))
+    };gc()
+  }
+  saveRDS(df_all_sp, out_rds)
+}
+
+
+col_types <- c("covered_species","endemic_species")
+my_break <- 0.2
+
+for (tmp_type in col_types) {
+  out_rds <-  paste0(out_path,                      "result_7_effectiveness_comparison_past_future/compare_effectiveness_on_proportion_covered_habitat_past_future_",tmp_type, "_break",my_break,".rds")
+  
+  if (!file.exists(out_rds)) {
+    df_PUs_sp <- readRDS(paste0(in_path,                                "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds"));gc()
+    df_PUs_sp <- data.frame(gbif_name=colnames(df_PUs_sp),
+                            Total_counts = colSums(df_PUs_sp)) 
+    rownames(df_PUs_sp) <- 1:nrow(df_PUs_sp)
+    input_rds <- paste0(out_path, "result_7_effectiveness_comparison_past_future/strategies_proportion_panda_limitated_conservation_",tmp_type,".rds")
+    tmp_df <- readRDS(input_rds) %>%
+      merge(.,df_PUs_sp,by="gbif_name", all.x=T)
+    tmp_df_info <- tmp_df %>% 
+      select(gbif_name, Total_counts)
+    tmp_df_sp <- tmp_df %>% 
+      select(-gbif_name, -Total_counts)/tmp_df_info$Total_counts
+      
+    tmp_plot_df <- data.frame(prop = NA, year = NA, count = NA)
+  
+    for (j in colnames(tmp_df_sp)) {
+      tmp_count <- NULL
+      for (tmp_b in seq(0, 1, my_break)) {
+        tmp_b_count <- sum(tmp_df_sp[,j] >=tmp_b)
+        tmp_count <- c(tmp_count, tmp_b_count)
+      }
+      tmp_plot_df_j <- data.frame(
+        prop = seq(0, 1, my_break),
+        year = rep(j, length(seq(0, 1, my_break))),
+        count = tmp_count
+      )
+      tmp_plot_df <- rbind(tmp_plot_df, tmp_plot_df_j)
+    }
+    
+    tmp_plot_df <- tmp_plot_df[-1,] %>% 
+      setNames(c("Prop","group", "count")) %>%
+      mutate(group = paste0(tmp_type, group)) %>% 
+      `rownames<-`(1:nrow(.))
+     
+    cat(tmp_type, "- breaks:", my_break, "\r")
+    saveRDS(tmp_plot_df, out_rds)
+  }
+}
+
+out_rds <- paste0(out_path,                      "result_7_effectiveness_comparison_past_future/compare_effectiveness_on_proportion_covered_habitat_past_future_break",my_break,".rds")
+if (!file.exists(out_rds)) {
+  path_prop <- list.files(paste0(out_path, "result_7_effectiveness_comparison_past_future/"), 
+                                 paste0("proportion.*",my_break,".*rds$"), 
+                          full.names = T)
+  path_prop <- path_prop[grepl(paste0(col_types,collapse = "|"), path_prop)]
+  df_prop <- readRDS(path_prop[1])
+  df_prop <- df_prop[0,]
+  for (i in 1:length(path_prop)) {
+    tmp_df <- readRDS(path_prop[i])
+    df_prop <- rbind(df_prop,tmp_df)          
+  }
+  saveRDS(df_prop, out_rds)
+}
+
+```
+
+
+
+

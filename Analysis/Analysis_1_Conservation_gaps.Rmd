@@ -1,0 +1,73 @@
+---
+title: "Analysis 1: Conservation gaps"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory 
+setwd(my_wd <- 'path/to/your/data/dir/') 
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(dplyr)
+library(reshape2)
+
+```
+
+# 1 Calculate the proportion of habitat covered by existing PAs for each species
+
+```{r}
+
+path_prop <- paste0(out_path,"result_1_conservation_gaps/prop_covered_habitat_by_species.csv")
+if (!file.exists(path_prop)) {
+  
+  # read pixels by species matrix for all species in whole study are
+  path_pixels <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+  df_pixels_sp <- readRDS(path_pixels)
+  # read coverage status of each pixels
+  path_coverage <- paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds")
+  v_covered_pixels <- readRDS(path_coverage)
+  
+  df_PAs_sp <- df_pixels_sp[v_covered_pixels==1,]
+  sp_list <- colnames(df_pixels_sp)
+  No_pixels <- colSums(df_pixels_sp)
+  No_PAs <- colSums(df_PAs_sp)
+  
+  df_prop <- sp_list %>% data.frame(gbif_name = .) %>% 
+    mutate(total_habitat := No_pixels,
+           covered_habitat := No_PAs,
+           prop_covered:= 1-covered_habitat/total_habitat,
+           covered_status = ifelse(prop_covered==1,"gap_species","covered_species"))
+  rm(df_pixels_sp);rm(df_PAs_sp);gc()
+  write.csv(df_prop, path_prop)
+}
+
+```
+
+# 2 Calculate the conservation gap scores for each pixel
+
+```{r}
+
+path_scores <- paste0(out_path,"result_1_conservation_gaps/gap_scores_by_pixels.rds")
+if (!file.exists(path_scores)) {
+  
+  path_pixels_binary <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+  mat_pixels_sp_binary <- readRDS(path_pixels_binary) %>% as.matrix()
+  
+  df_prop <- read.csv(path_prop, row=1)
+  mat_prop <- df_prop %>% pull(prop_covered) %>% as.matrix()
+  cols_covered_sp <- (df_prop$covered_status=="covered_species")
+  cols_gap_sp <- (df_prop$covered_status=="gap_species")
+  
+  df_gap_scores <- data.frame(gapscores_all_sp=rep(NA,nrow(mat_pixels_sp_binary)))
+  
+  df_gap_scores$gapscores_all_sp <- as.numeric(mat_pixels_sp_binary %*% mat_prop)
+  df_gap_scores$gapscores_covered_sp <- as.numeric(mat_pixels_sp_binary[,cols_covered_sp] %*% mat_prop[cols_covered_sp])
+  df_gap_scores$gapscores_gap_sp <- as.numeric(mat_pixels_sp_binary[,cols_gap_sp] %*% mat_prop[cols_gap_sp])
+  
+  saveRDS(df_gap_scores, path_scores)
+}
+        
+```
+

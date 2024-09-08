@@ -1,0 +1,590 @@
+---
+title: "Analysis 6: Comparison of three optimization strategies"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(dplyr)
+library(reshape2)
+library(terra)
+library(ggplot2)
+library(sf)
+library(tidyr)
+
+```
+
+# 1 Output a raster combining the results of three optimization strategies
+
+```{r}
+
+out_ras_mulsum <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/Comparison_of_three_optimization_strategies_mulsum.tif")
+out_ras_sum <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/Comparison_of_three_optimization_strategies_sum.tif")
+out_ras <- c(out_ras_sum, out_ras_mulsum)
+
+if (sum(!file.exists(out_ras))!=0) {
+  
+  my_folder <- paste0(out_path, "result_4_conservation_optimiztion_our_method/")
+  path_strategies <- list.files(list.files(list.files(my_folder, full.names = T), "final_results", full.names = T), ".*all.*50.*rds$", full.names = T)
+  ras_mulsum <- ras_sum <- rast(paste0(in_path, "template_datasets/template.tif"))
+
+  df_rds <- readRDS(path_strategies[1])
+  for (i in 2:length(path_strategies)) {
+    df_rds <- cbind(df_rds, readRDS(path_strategies[i]))
+  }
+  df_rds <- df_rds %>% data.frame()
+  colnames(df_rds) <- sub(".*(strategy\\d+).*", "\\1", basename(path_strategies))
+  for (r in 1:length(df_rds)) {
+    tmp_v <- df_rds[,r]
+    new_v <- ifelse(tmp_v==-1, NA, tmp_v)
+    new_v <- ifelse(new_v>0, 1*10^(3-r), new_v)
+    df_rds[,r] <- new_v
+  }
+  df_rds <- df_rds %>%
+    mutate(sum=rowSums(.,na.rm=T))
+  
+  sel_all <- which(df_rds$sum==0)
+  sel_0 <- which(df_rds$strategy1==0)
+  sel_na <- setdiff(sel_all,sel_0)
+  df_rds$sum[sel_na] <- NA
+  sel_PAs <- which(df_rds$strategy3==0)
+  sel_non_PAs <- setdiff(sel_0,sel_PAs)
+  
+  df_rds$sum[sel_non_PAs] <- -1
+  v_type <- ifelse(df_rds$sum==111, 3, df_rds$sum)
+  v_type <- ifelse(v_type==11, 2, v_type)
+  v_type <- ifelse(v_type==1|v_type==100, 1, v_type)
+  
+  ras_mulsum[!is.na(ras_mulsum)] <- df_rds$sum
+  if (sum(!file.exists(out_ras_mulsum))!=0) {
+    writeRaster(ras_mulsum, out_ras_mulsum, datatype="INT2S", gdal=c("COMPRESS=ZSTD"))
+  }
+  ras_sum[!is.na(ras_sum)] <- v_type
+  if (sum(!file.exists(out_ras_sum))!=0) {
+    writeRaster(ras_sum, out_ras_sum, datatype="INT2S", gdal=c("COMPRESS=ZSTD"))
+  }
+}
+
+```
+
+# 2 Output a raster with the optimization results of strategy 2
+
+```{r}
+
+out_ras <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/optimization_strategy2.tif")
+
+if (!file.exists(out_ras)) {
+  my_folder <- paste0(out_path, "result_4_conservation_optimiztion_our_method/")
+  path_strategy <- list.files(list.files(list.files(my_folder, full.names = T), "final_results", full.names = T), ".*2_all.*50.*rds$", full.names = T)
+  ras_strategy2 <- rast(paste0(in_path, "template_datasets/template.tif"))
+  df_rds <- readRDS(path_strategy)
+  ras_strategy2[!is.na(ras_strategy2)] <- df_rds
+
+  no_pixel_30 <- ceiling(length(df_rds)*0.3)
+  no_pixel_50 <- ceiling(length(df_rds)*0.5)
+  no_pixel_PAs <- sum(df_rds==0,na.rm=T)
+  rank_value_30 <- no_pixel_30 - no_pixel_PAs
+  rank_value_50 <- no_pixel_50 - no_pixel_PAs
+
+  ras_strategy2[ras_strategy2==-1] <- NA
+  v_30 <- ras_strategy2[ras_strategy2>0 & ras_strategy2<=rank_value_30]
+  v_30_new <- data.frame(v_30) %>% 
+    setNames("value") %>% 
+    mutate(rank=rank(-value)) %>% 
+    pull(rank) *-1
+  ras_strategy2[ras_strategy2>0 & ras_strategy2<=rank_value_30] <- v_30_new
+  
+  v_50 <- ras_strategy2[ras_strategy2>0 & ras_strategy2<=rank_value_50]
+  v_50_new <- data.frame(v_50) %>% 
+    setNames("value") %>% 
+    mutate(rank=rank(value)) %>% 
+    pull(rank)
+  ras_strategy2[ras_strategy2>0 & ras_strategy2<=rank_value_50] <- v_50_new
+  ras_strategy2[ras_strategy2==0] <- NA
+  writeRaster(ras_strategy2, out_ras, datatype="INT4S", gdal=c("COMPRESS=ZSTD"))
+}
+
+```
+
+
+# 3 Administrative optimization with three optimization stratigies
+
+```{r}
+
+out_barplot <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/administrative_optimization_under_three_strategies_rank_by_county_barplot.rds")
+out_lollipop <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/administrative_optimization_under_three_strategies_rank_by_county_lollipop.rds")
+out_all <- c(out_barplot, out_lollipop)
+tmp_top <- 0.2
+if (sum(!file.exists(out_all))!=0) {
+
+  path_strategies <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/Comparison_of_three_optimization_strategies_mulsum.tif")
+  ras_strategies <- ras_strategies_backup <- rast(path_strategies)
+  ras_pref_county <- rast(paste0(in_path, "county_data/Prefecture_County.tif"))
+  ras_PAs <- ras_template <- rast(paste0(in_path, "template_datasets/template.tif"))
+  ras_PAs[!is.na(ras_PAs)] <- readRDS(paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds"))
+  shp_county <- st_read(paste0(in_path, "county_data/County.shp"))
+
+  df_county <- st_drop_geometry(shp_county) %>%
+    mutate(ID_pref_coun = paste0(ID_prefec, ID_county)) %>% 
+    select(ID_pref_coun,Prefecture,County)
+
+  ras_pref_county_el <- ras_pref_county * 1000
+  ras_strategies[is.na(ras_strategies)] <- 3 
+  ras_strategies[ras_PAs==1] <- 0
+  ras_strategies[ras_strategies_backup==-1] <- 2 
+  ras_strategies <- ras_strategies * ras_template
+  ras_strategies_county <-  ras_pref_county_el+ras_strategies 
+
+  df_pref <- values(ras_pref_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("ID_pref_coun") %>%
+    mutate(total_count = 1,
+           ID_pref_coun=sprintf("%05d", ID_pref_coun),
+           ID_pref= as.numeric(substr(ID_pref_coun, 1, 2))) %>% 
+    group_by(ID_pref) %>%
+    summarize(total_count_pref = sum(total_count))
+
+  df_pref_county <- values(ras_pref_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("ID_pref_coun") %>%
+    mutate(total_count = 1,
+           ID_pref_coun=sprintf("%05d", ID_pref_coun),
+           ID_pref= as.numeric(substr(ID_pref_coun, 1, 2))) %>% 
+    group_by(ID_pref_coun) %>%
+    summarize(across(c(total_count), sum),
+              across(c(ID_pref), first)) %>% 
+    merge(.,df_pref, by="ID_pref", all.x=T)
+
+  df_strategies_county <- values(ras_strategies_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("value") %>%
+    mutate(count = 1) %>% 
+    group_by(value) %>%
+    summarize(count = sum(count)) %>%
+    mutate(value = sprintf("%08d", value),
+           ID_pref = as.numeric(substr(value, 1, 2)),
+           ID_coun = as.numeric(substr(value, 3, 5)),
+           ID_pref_coun = sprintf("%05d", as.numeric(substr(value, 1, 5))),
+           ID_strategies = as.numeric(substr(value, 6, 8))) %>% 
+    select(value,ID_pref_coun,ID_pref,ID_coun,ID_strategies,count) %>% 
+    rename(ID_coun_scen= value)
+
+  df_temp <- data.frame(ID_pref_coun=rep(unique(df_strategies_county$ID_pref_coun, 
+                                     each =length(unique(df_strategies_county$ID_strategies)))),
+                       ID_strategies=rep(unique(df_strategies_county$ID_strategies), 
+                                     each =length(unique(df_strategies_county$ID_pref_coun)))) %>% 
+    mutate(ID_pref_coun= ID_pref_coun,
+           ID_strategies= sprintf("%03d", ID_strategies),
+           ID_coun_scen = paste0(ID_pref_coun, ID_strategies)) %>% 
+    merge(.,df_county, by="ID_pref_coun", all.x=T) %>% 
+    merge(.,df_pref_county,by="ID_pref_coun",all.x=T) %>% 
+    select(ID_coun_scen,Prefecture,County,total_count,total_count_pref)
+  
+  df_coun_scen <- merge(df_strategies_county, df_temp, by="ID_coun_scen", all.y=T) %>% 
+    mutate(count=ifelse(is.na(count), 0, count),
+           prop_coun=(count/total_count)*100,
+           prop_pref=(count/total_count_pref)*100,
+           ID_pref = substr(ID_coun_scen, 1, 2),
+           ID_coun = substr(ID_coun_scen, 3, 5),
+           ID_pref_coun = sprintf("%05d", as.numeric(substr(ID_coun_scen, 1, 5))),
+           ID_strategies = substr(ID_coun_scen, 6, 8),
+           ID_pref_scen = paste0(ID_pref,ID_strategies))%>% 
+    mutate(area_count_km2=count*900/1000*900/1000)
+  
+  df_pref_scen <- df_coun_scen %>%
+    group_by(ID_pref_scen) %>% 
+    summarise(across(c(ID_pref,ID_strategies,Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum))
+  
+  df_pref_rank1 <- df_pref_scen %>% 
+    filter(ID_strategies!="003") %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_CurFut_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_CurFut_Pref= as.integer(rank(-count)),
+           count_pref_Fut2=count,
+           prop_pref_Fut2=prop_pref,
+           area_count_pref_Fut2_km2=count_pref_Fut2*900/1000*900/1000) %>% 
+    select(ID_pref, Prefecture,count_pref_Fut2,area_count_pref_Fut2_km2,
+           prop_pref_Fut2,Rank_Prop_CurFut_Pref, Rank_Area_CurFut_Pref)
+
+  df_pref_rank2 <- df_pref_scen %>% 
+    filter(grepl("1",ID_strategies)) %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_Fut_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_Fut_Pref= as.integer(rank(-count))) %>% 
+    select(ID_pref, Rank_Prop_Fut_Pref, Rank_Area_Fut_Pref)
+  
+  df_pref_rank3 <- df_pref_scen %>% 
+    filter(grepl("111|11",ID_strategies)) %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_Fut2_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_Fut2_Pref= as.integer(rank(-count))) %>% 
+    select(ID_pref, Rank_Prop_Fut2_Pref, Rank_Area_Fut2_Pref)
+
+  df_pref_rank <- merge(df_pref_rank1, df_pref_rank2) %>% 
+    merge(.,df_pref_rank3)
+
+  df_coun_rank1 <- df_coun_scen %>% 
+    filter(ID_strategies!="003") %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>% 
+    mutate(Rank_Prop_CurFut_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_CurFut_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun,ID_pref, ID_coun, County, Rank_Prop_CurFut_Coun, Rank_Area_CurFut_Coun)
+
+  df_coun_rank2 <- df_coun_scen %>% 
+    filter(grepl("1",ID_strategies)) %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>%
+    mutate(Rank_Prop_Fut_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_Fut_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun, Rank_Prop_Fut_Coun, Rank_Area_Fut_Coun)
+
+  df_coun_rank3 <- df_coun_scen %>% 
+    filter(grepl("111|11",ID_strategies)) %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>%
+    mutate(Rank_Prop_Fut2_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_Fut2_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun, Rank_Prop_Fut2_Coun, Rank_Area_Fut2_Coun)
+
+  df_coun_rank <- merge(df_coun_rank1, df_coun_rank2) %>% 
+    merge(., df_coun_rank3)
+  df_ranks <- merge(df_coun_rank, df_pref_rank) %>% 
+    select(-ID_pref,-ID_coun, -County, -Prefecture)
+  
+  df_rank_by_county <- merge(df_coun_scen, df_ranks, by="ID_pref_coun")
+  
+  df_barplot <- df_rank_by_county %>% 
+    mutate(strategies=as.factor(ID_strategies),
+           ID_strategies=as.numeric(ID_strategies),
+           value=area_count_km2,
+           value=ifelse(ID_strategies==0, value*-1, value),
+           value=ifelse(ID_strategies==2, value*-1, value))
+  levels(df_barplot$strategies) <- c("Current PAs","Strategy3 extrac attention","Strategy3 excluded PAs","Unprocted area","Strategy2&3","Strategy1","Strategy1&2&3")
+  
+  tmp_county_top <- df_barplot %>% 
+    filter(Rank_Area_Fut2_Coun <= ceiling(length(unique(df_barplot$ID_coun)) * tmp_top)) %>% 
+    pull(ID_pref_coun) %>% 
+    unique()
+
+  df_coun_top <- df_barplot %>% 
+    filter(ID_pref_coun %in% tmp_county_top) %>% 
+    select(Prefecture, County,strategies,count,value,
+           area_count_km2,total_count,prop_coun,
+           Rank_Prop_Fut2_Pref, Rank_Prop_Fut2_Coun,
+           Rank_Area_Fut2_Pref, Rank_Area_Fut2_Coun,
+           Rank_Prop_Fut_Pref, Rank_Prop_Fut_Coun,
+           Rank_Area_Fut_Pref, Rank_Area_Fut_Coun)
+  
+  df_out_barplot <- df_coun_top %>% 
+    arrange(Rank_Area_Fut_Coun) %>% 
+    mutate(ID=as.factor(Rank_Area_Fut_Coun),
+           ID=as.numeric(ID))
+  
+  df_lollipop <- df_rank_by_county %>% 
+    mutate(strategies=as.factor(ID_strategies),
+           ID_strategies=as.numeric(ID_strategies),
+           value=area_count_km2,
+           value=ifelse(ID_strategies==0, value*-1, value),
+           value=ifelse(ID_strategies==2, value*-1, value))
+  levels(df_lollipop$strategies) <- c("Current PAs","Strategy3 extrac attention","Strategy3 excluded PAs","Unprocted area","Strategy2&3","Strategy1","Strategy1&2&3")
+  
+  tmp_county_top <- df_lollipop %>% 
+    filter(Rank_Area_Fut2_Coun <= ceiling(length(unique(df_lollipop$ID_coun)) * tmp_top)) %>% 
+    pull(ID_pref_coun) %>% 
+    unique()
+
+  df_coun_top <- df_lollipop %>% 
+    filter(ID_pref_coun %in% tmp_county_top) %>% 
+    filter(strategies=="Current PAs"|
+             strategies=="Strategy1&2&3")
+  
+  df_coun_top_optimiz <- df_coun_top %>% 
+    group_by(County) %>% 
+    summarize(count_PAs_s123 = sum(count)) %>% 
+    mutate(area_count_PAs123 = count_PAs_s123*900/1000*900/1000) %>% 
+    ungroup()
+  
+  df_count_rank <- merge(df_coun_top, df_coun_top_optimiz) %>% 
+    arrange(area_count_PAs123) %>% 
+    mutate(ID=rep(seq(1, nrow(.)/length(unique(strategies))), 
+                  each=length(unique(strategies)))) %>% 
+    select(-matches("Rank|ID_")) %>% 
+    select(County,  strategies, area_count_km2, ID)
+  
+  df_out_lollipop <- df_count_rank %>%
+    pivot_wider(names_from = strategies, values_from =  area_count_km2) %>% 
+    setNames(c("County", "ID", "Current_PAs", "Future_PAs")) %>% 
+    mutate(Cur_Fut_PAs = Current_PAs + Future_PAs) 
+  
+  if (!file.exists(out_barplot)) { 
+    saveRDS(df_out_barplot, out_barplot)
+  }
+  if (!file.exists(out_lollipop)) {
+    saveRDS(df_out_lollipop, out_lollipop)
+  }
+}
+
+```
+
+# 4 Administrative optimization with optimization strategy 2
+
+
+```{r}
+ 
+out_barplot <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/administrative_optimization_under_strategy2_rank_by_county_barplot.rds")
+out_lollipop <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/administrative_optimization_under_strategy2_rank_by_county_lollipop.rds")
+out_all <- c(out_barplot, out_lollipop)
+tmp_top <- 0.2
+
+if (sum(!file.exists(out_all))!=0) {
+  
+  path_strategy <- paste0(out_path, "result_6_comparison_of_three_optimization_strategies/optimization_strategy2.tif")
+  ras_strategy <- ras_strategy_backup <- rast(path_strategy)
+  ras_template <- rast(paste0(in_path, "template_datasets/template.tif"))
+  ras_pref_county <- rast(paste0(in_path, "county_data/Prefecture_County.tif"))
+  ras_PAs[!is.na(ras_PAs)] <- readRDS(paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds"))
+  
+  ras_strategy[ras_strategy>0] <- 5
+  ras_strategy[ras_strategy<0] <- 3
+  ras_strategy[is.na(ras_strategy)] <- 0
+  ras_strategy <- ras_strategy * ras_template
+  ras_strategy[ras_PAs==1] <- 1
+  
+  shp_county <-  st_read(paste0(in_path, "county_data/County.shp"))
+  df_county <- st_drop_geometry(shp_county) %>% 
+    mutate(ID_pref_coun = paste0(ID_prefec, ID_county)) %>% 
+    select(ID_pref_coun,Prefecture,County)
+  
+  ras_pref_county_el <- ras_pref_county * 10
+  ras_strategy_county <-  ras_pref_county_el+ras_strategy
+  
+  df_pref <- values(ras_pref_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("ID_pref_coun") %>%
+    mutate(total_count = 1,
+           ID_pref_coun=sprintf("%05d", ID_pref_coun),
+           ID_pref= as.numeric(substr(ID_pref_coun, 1, 2))) %>% 
+    group_by(ID_pref) %>%
+    summarize(total_count_pref = sum(total_count))
+  
+  df_pref_county <- values(ras_pref_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("ID_pref_coun") %>%
+    mutate(total_count = 1,
+           ID_pref_coun=sprintf("%05d", ID_pref_coun),
+           ID_pref= as.numeric(substr(ID_pref_coun, 1, 2))) %>% 
+    group_by(ID_pref_coun) %>%
+    summarize(total_count = sum(total_count),
+              ID_pref= first(ID_pref)) %>% 
+    merge(.,df_pref, by="ID_pref", all.x=T)  
+  rm(df_pref)
+  
+  df_strategy_county <- values(ras_strategy_county) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.)) %>% 
+    setNames("value") %>%
+    mutate(count = 1) %>% 
+    group_by(value) %>%
+    summarize(count = sum(count)) %>%
+    mutate(value = sprintf("%06d", value),
+           ID_pref = as.numeric(substr(value, 1, 2)),
+           ID_coun = as.numeric(substr(value, 3, 5)),
+           ID_pref_coun = sprintf("%05d", as.numeric(substr(value, 1, 5))),
+           ID_strategies = as.numeric(substr(value, 6, 6))) %>% 
+    select(value,ID_pref_coun,ID_pref,ID_coun,ID_strategies,count) %>% 
+    rename(ID_coun_scen= value)
+  
+  df_temp <- data.frame(ID_pref_coun=rep(unique(df_strategy_county$ID_pref_coun, 
+                                     each =length(unique(df_strategy_county$ID_strategies)))),
+                       ID_strategies=rep(unique(df_strategy_county$ID_strategies), 
+                                     each =length(unique(df_strategy_county$ID_pref_coun)))) %>% 
+    mutate(ID_pref_coun= ID_pref_coun,
+           ID_strategies= sprintf("%01d", ID_strategies),
+           ID_coun_scen = paste0(ID_pref_coun, ID_strategies)) %>% 
+    merge(.,df_county, by="ID_pref_coun", all.x=T) %>% 
+    merge(.,df_pref_county,by="ID_pref_coun",all.x=T) %>% 
+    select(ID_coun_scen,Prefecture,County,total_count,total_count_pref)
+  
+  df_coun_scen <- merge(df_strategy_county, df_temp, by="ID_coun_scen", all.y=T) %>% 
+    mutate(count=ifelse(is.na(count), 0, count),
+           prop_coun=(count/total_count)*100,
+           prop_pref=(count/total_count_pref)*100,
+           ID_pref = substr(ID_coun_scen, 1, 2),
+           ID_coun = substr(ID_coun_scen, 3, 5),
+           ID_pref_coun = sprintf("%05d", as.numeric(substr(ID_coun_scen, 1, 5))),
+           ID_strategies = substr(ID_coun_scen, 6, 6),
+           ID_pref_scen = paste0(ID_pref,ID_strategies)) %>% 
+    mutate(area_count_km2=count*900/1000*900/1000)
+  
+  df_pref_scen <- df_coun_scen %>%
+    group_by(ID_pref_scen) %>% 
+    summarise(across(c(ID_pref,ID_strategies,Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum))
+  
+  df_pref_rank1 <- df_pref_scen %>% 
+    filter(ID_strategies!="0") %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_CurFut_Pref=as.integer(rank(-prop_pref)),
+           Rank_Area_CurFut_Pref=as.integer(rank(-count)),
+           count_pref_CF=count,
+           prop_pref_CF=prop_pref,
+           area_count_pref_km2=count_pref_CF*900/1000*900/1000) %>% 
+    select(ID_pref, Prefecture,count_pref_CF,area_count_pref_km2,
+           prop_pref_CF,Rank_Prop_CurFut_Pref, Rank_Area_CurFut_Pref)
+  
+  df_pref_rank2 <- df_pref_scen %>% 
+    filter(grepl("3|5",ID_strategies)) %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_Fut_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_Fut_Pref= as.integer(rank(-count))) %>% 
+    select(ID_pref, Rank_Prop_Fut_Pref, Rank_Area_Fut_Pref)
+  
+  df_pref_rank3 <- df_pref_scen %>% 
+    filter(grepl("3",ID_strategies)) %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_Fut3_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_Fut3_Pref= as.integer(rank(-count))) %>% 
+    select(ID_pref, Rank_Prop_Fut3_Pref, Rank_Area_Fut3_Pref)
+  
+  df_pref_rank4 <- df_pref_scen %>% 
+    filter(grepl("1",ID_strategies)) %>% 
+    group_by(ID_pref) %>% 
+    summarise(across(c(Prefecture,total_count_pref), first),
+              across(c(count,prop_pref), sum)) %>% 
+    mutate(Rank_Prop_Cur_Pref= as.integer(rank(-prop_pref)),
+           Rank_Area_Cur_Pref= as.integer(rank(-count))) %>% 
+    select(ID_pref, Rank_Prop_Cur_Pref, Rank_Area_Cur_Pref)  
+  df_pref_rank <- merge(df_pref_rank1, df_pref_rank2) %>% 
+    merge(.,df_pref_rank3) %>% 
+    merge(.,df_pref_rank4)
+ 
+  df_coun_rank1 <- df_coun_scen %>%
+    filter(ID_strategies!="0") %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>% 
+    mutate(Rank_Prop_CurFut_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_CurFut_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun,ID_pref, ID_coun, County, Rank_Prop_CurFut_Coun, Rank_Area_CurFut_Coun)
+  
+  df_coun_rank2 <- df_coun_scen %>% 
+    filter(grepl("3|5",ID_strategies)) %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>%
+    mutate(Rank_Prop_Fut_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_Fut_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun, Rank_Prop_Fut_Coun, Rank_Area_Fut_Coun)
+  
+  df_coun_rank3 <- df_coun_scen %>% 
+    filter(grepl("3",ID_strategies)) %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>%
+    mutate(Rank_Prop_Fut3_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_Fut3_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun, Rank_Prop_Fut3_Coun, Rank_Area_Fut3_Coun)
+  
+  df_coun_rank4 <- df_coun_scen %>% 
+    filter(grepl("1",ID_strategies)) %>% 
+    group_by(ID_pref_coun) %>% 
+    summarise(across(c(ID_pref,ID_coun,County,total_count), first),
+              across(c(count,prop_coun), sum)) %>%
+    mutate(Rank_Prop_Cur_Coun= as.integer(rank(-prop_coun)),
+           Rank_Area_Cur_Coun= as.integer(rank(-count))) %>% 
+    select(ID_pref_coun, Rank_Prop_Cur_Coun, Rank_Area_Cur_Coun)
+  
+  df_coun_rank <- merge(df_coun_rank1, df_coun_rank2) %>% 
+    merge(., df_coun_rank3) %>% 
+    merge(.,df_coun_rank4)
+  df_ranks <- merge(df_coun_rank, df_pref_rank) %>% 
+    select(-ID_pref,-ID_coun, -County, -Prefecture)
+  df_rank_by_county <- merge(df_coun_scen, df_ranks, by="ID_pref_coun")
+  
+  df_barplot <- df_rank_by_county %>% 
+    mutate(strategies=as.factor(ID_strategies),
+           ID_strategies=as.numeric(ID_strategies),
+           value=prop_coun)
+  levels(df_barplot$strategies) <- c("Current PAs","Unprocted area", 
+                                           "Top 30%","Top 50%")
+  
+  tmp_county_top <- df_barplot %>% 
+    filter(Rank_Prop_Fut_Coun <= ceiling(length(unique(df_barplot$ID_coun)) * tmp_top)) %>% 
+    pull(ID_pref_coun) %>% 
+    unique()
+  
+  df_out_barplot <- df_barplot %>% 
+    filter(ID_pref_coun %in% tmp_county_top) %>% 
+    select(Prefecture, County, strategies, count, value,
+           area_count_km2,total_count,prop_coun,
+           Rank_Prop_Cur_Pref, Rank_Prop_Cur_Coun,
+           Rank_Prop_CurFut_Pref, Rank_Prop_CurFut_Coun,
+           Rank_Prop_Fut_Pref, Rank_Prop_Fut_Coun,
+           Rank_Prop_Fut3_Pref, Rank_Prop_Fut3_Coun) %>%
+    mutate(ID=rep(seq(1, nrow(.)/length(unique(strategies))),
+                  each=length(unique(strategies))))
+  
+  
+  df_lollipop <- df_coun_scen_rank %>% 
+    mutate(strategies=as.factor(ID_strategies),
+           ID_strategies=as.numeric(ID_strategies),
+           value=prop_coun)
+  levels(df_lollipop$strategies) <- c("Current PAs","Unprocted area", 
+                                            "Top 30%","Top 50%")
+    
+  tmp_county_top <- df_lollipop %>% 
+    filter(Rank_Prop_Fut_Coun <= ceiling(length(unique(df_lollipop$ID_coun)) * tmp_top)) %>% 
+    pull(ID_pref_coun) %>% 
+    unique()
+
+  df_coun_top <- df_lollipop %>% 
+    filter(ID_pref_coun %in% tmp_county_top) %>% 
+    filter(strategies=="Top 30%"|
+             strategies=="Top 50%") %>% 
+    select(County,strategies, value)
+  
+  df_out_lollipop <- df_coun_top %>%
+    pivot_wider(names_from = strategies, values_from =  value) %>% 
+    setNames(c("County", "Top_30", "Top_50")) %>% 
+    mutate(Top_30_50 =Top_30+Top_50) %>% 
+    arrange(Top_30_50) %>% 
+    mutate(ID=rank(Top_30_50))
+  
+  if (!file.exists(out_barplot)) { 
+    saveRDS(df_out_barplot, out_barplot)
+  }
+  if (!file.exists(out_lollipop)) {
+    saveRDS(df_out_lollipop, out_lollipop)
+  }
+}
+
+```
+
+

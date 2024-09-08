@@ -1,0 +1,398 @@
+---
+title: "Analysis 5: Impact of land-use change on biodiversity conservation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+
+library(dplyr)
+library(reshape2)
+library(terra)
+library(ggplot2)
+
+my_theme <- theme(axis.ticks.length = unit(-0.05, "cm"),
+                  axis.ticks = element_line(size = 0.2),
+                  axis.title.x = element_text(size = 5, margin = margin(0,0,0,0)),
+                  axis.title.y = element_blank(),
+                  axis.text = element_text(size = 5),
+                  panel.background = element_rect(fill = "transparent"),
+                  plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+                  panel.border = element_rect(color = "black", fill = NA, size=0.4),
+                  legend.position = "hidden")
+
+```
+
+# 1 Proportion of converted human-dominated land use for each of 167 PAs by 2050
+
+```{r}
+
+future_years <- 2050
+out_rds <- paste0(out_path, "result_5_land_use_change_impact_on_conservation/lucc_impact_on_PAs_",paste0(future_years,collapse = "_"),".rds")
+
+if (!file.exists(out_rds)) {
+  
+  path_PAs <- paste0(in_path, "PAs_coverage/PAs_ID_dynamic.tif")
+  ras_PAs <- rast(path_PAs)
+  df_PAs <- values(ras_PAs) %>% 
+    data.frame() %>% 
+    filter(complete.cases(.))
+  rm(ras_PAs)
+ 
+  in_lucc <- paste0(in_path, "future_LUCC_datasets/LUCC_human_dominated_SSPs_RCPs_binary/")
+  path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T)
+  df_PUs_lucc_fy <- readRDS(path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T))
+
+  df_PAs_lucc <- df_PAs %>% setNames("ID_PAs")
+  v_PAs <- df_PAs %>% pull()
+  for (tmp_col in colnames(df_PUs_lucc_fy)){
+    tmp_lucc <- df_PUs_lucc_fy[,tmp_col]==0
+    tmp_PA_lucc <- v_PAs * tmp_lucc
+    df_PAs_lucc <- df_PAs_lucc %>% 
+      mutate(!!tmp_col := tmp_PA_lucc)
+  }
+  
+  df_PAs_lucc <- df_PAs_lucc %>% 
+    filter(ID_PAs!=0)
+  saveRDS(df_PAs_lucc, out_rds)
+  rm(df_PUs_lucc_fy)
+}
+
+out_rds_ID <- gsub("\\.rds", "_by_ID.rds", out_rds)
+if (!file.exists(out_rds_ID)) {
+  
+  df_PAs_lucc <- readRDS(out_rds)
+  df_PAs_ID <- table(df_PAs_lucc$ID_PAs) %>% 
+    data.frame() %>% 
+    setNames(c("fc", "non_lucc")) %>% 
+    mutate(ID_PAs=as.numeric(names(table(df_PAs_lucc$ID_PAs)))) %>% 
+    select(ID_PAs,non_lucc)
+  for ( i in 2:ncol(df_PAs_lucc)) {
+    tmp_name <- colnames(df_PAs_lucc)[i]
+    tmp_sel <- df_PAs_lucc[,tmp_name]
+    tmp_table <- table(tmp_sel) %>% 
+      data.frame() %>% 
+      setNames(c("fc", tmp_name)) %>% 
+      mutate(ID_PAs=as.numeric(names(table(tmp_sel)))) %>% 
+      select(ID_PAs,tmp_name)
+    
+    df_PAs_ID <- merge(df_PAs_ID, tmp_table, by="ID_PAs", all.x=T)
+  }
+  df_PAs_ID <- df_PAs_ID %>% 
+    arrange(ID_PAs) %>% 
+    mutate(ID_PAs = as.numeric(ID_PAs),
+           ID_NRs = ifelse(ID_PAs>=200, ID_PAs-200, ID_PAs),
+           ID_NRs = ifelse(ID_NRs==167, NA, ID_NRs),
+           ID_NP = ifelse(ID_PAs>=200, 167, NA)) %>% 
+    select(matches("ID_"), everything())
+  
+  col_lucc <- colnames(df_PAs_ID)[!grepl("ID_",colnames(df_PAs_ID))]
+  df_PAs_sta <- data.frame(ID_PAs = 1:167)
+  for (tmp_col in col_lucc) {
+    tmp_lucc <- df_PAs_ID %>% 
+      select(matches(paste0("ID_|", tmp_col)))
+    tmp_lucc_NRs <- tmp_lucc %>% 
+      group_by(ID_NRs) %>%
+      summarize(across(all_of(tmp_col), sum, na.rm = TRUE)) %>% 
+      filter(!is.na(ID_NRs)) %>% 
+      setNames(c("ID_PAs", tmp_col))
+    tmp_lucc_NP <- tmp_lucc %>% 
+      group_by(ID_NP) %>%
+      summarize(across(all_of(tmp_col), sum, na.rm = TRUE)) %>% 
+      filter(!is.na(ID_NP)) %>% 
+      setNames(c("ID_PAs", tmp_col))
+    tmp_lucc_PAs <- rbind(tmp_lucc_NRs, tmp_lucc_NP)
+    df_PAs_sta <- merge(df_PAs_sta, tmp_lucc_PAs, by="ID_PAs")
+  }
+  saveRDS(df_PAs_sta, out_rds_ID)
+}
+    
+out_rds_prop <- gsub("\\.rds", "_prop.rds", out_rds_ID)
+if (!file.exists(out_rds_prop)) {
+  df_PAs_sta <- readRDS(out_rds_ID)
+  df_PAs_prop_part1 <- df_PAs_sta %>% 
+    select(ID_PAs)
+  df_PAs_prop_part2 <- df_PAs_sta %>% 
+    select(non_lucc)      
+  df_PAs_prop_part3 <- (df_PAs_prop_part2$non_lucc- df_PAs_sta %>% 
+                          select(-c(ID_PAs,non_lucc)))/df_PAs_prop_part2$non_lucc
+  df_PAs_prop <- cbind(df_PAs_prop_part1, df_PAs_prop_part2, df_PAs_prop_part3)
+  saveRDS(df_PAs_prop, out_rds_prop)
+}
+
+out_rds_mean <- gsub("\\.rds", "_mean.rds", out_rds_prop)
+if (!file.exists(out_rds_mean)) {
+  
+  df_PAs_prop <- readRDS(out_rds_prop) %>% 
+    select(-matches(paste0("all|ID_PAs|non_lucc")))
+ 
+  df_mean <- data.frame(matrix(NA, nrow=ncol(df_PAs_prop), ncol =7)) %>%
+    rename_with(~c("scenario", "Num_lucc_PAs", "Prop_Num_lucc_PAs",
+                   "Num_total_lucc_PAs","Prop_Num_total_lucc_PAs",
+                   "Prop_lucc_PAs_ave","Prop_lucc_PAs_sd")) %>% 
+    mutate(scenario=colnames(df_PAs_prop))
+ 
+  for (tmp_r in 1:ncol(df_PAs_prop)) {
+      tmp_df <- df_PAs_prop[,tmp_r]
+      tmp_v <- c(sum(tmp_df!=1), 
+                 sum(tmp_df!=1)/nrow(df_PAs_prop)*100, 
+                 sum(tmp_df==0),
+                 sum(tmp_df==0)/nrow(df_PAs_prop)*100,
+                 mean(tmp_df, na.rm=T)*100,
+                 sd(tmp_df, na.rm = T)*100)
+      df_mean[tmp_r,2:7] <- tmp_v
+  }
+  saveRDS(df_mean, out_rds_mean)
+}
+ 
+out_csv <- paste0(dirname(out_rds_mean), "/Tab1_LUCC_impact_on_PAs.csv")
+if (!file.exists(out_csv)) {
+  
+  df_mean <- readRDS(out_rds_mean)
+  mean(df_mean$Prop_Num_lucc_PAs)
+  sd(df_mean$Prop_Num_lucc_PAs)
+  mean(df_mean$Prop_Num_total_lucc_PAs)
+  sd(df_mean$Prop_Num_total_lucc_PAs)
+  
+  mean(df_mean$Num_lucc_PAs)
+  sd(df_mean$Num_lucc_PAs)
+  mean(df_mean$Num_total_lucc_PAs)
+  sd(df_mean$Num_total_lucc_PAs)
+  col_mean <- c("Mean",colMeans(df_mean[,-1]))
+  col_sd <- c("SD", apply(df_mean[,-1], 2, sd))
+
+  
+  df_out <- rbind(df_mean,col_mean, col_sd) %>% 
+    mutate(across(-scenario, as.numeric)) %>% 
+    mutate(across(where(is.numeric), ~ round(., digits = 2)))
+  
+  my_stat <- c("No. of Human-Dominated PAs",
+               "Prop. of Human-Dominated PAs (%)",
+               "No. of Fully Converted PAs",
+               "Prop. of Fully Converted PAs (%)",
+               "Mean Prop. of Human-Dominated PAs (%)",
+               "SD of Prop. of Human-Dominated PAs (%)")
+  
+  df_out_t <- t(df_out) %>% 
+    data.frame(.) %>% 
+    `colnames<-`(df_out$scenario) %>% 
+    .[-1,] %>% 
+    mutate("land-use_change" = my_stat) %>% 
+    select(matches("land-use"), everything())
+  
+  rownames(df_out_t) <- NULL
+  write.csv(df_out_t, out_csv)
+  
+} 
+
+```
+
+# 2 Proportion of habitat loss for each of 3372 covered species in existing PAs by 2050
+
+```{r}
+
+future_years <- 2050
+out_rds <- paste0(out_path, "result_5_land_use_change_impact_on_conservation/lucc_impact_on_covered_species_within_PAs_",paste0(future_years,collapse = "_"),".rds")
+
+if (!file.exists(out_rds)) {
+
+  path_pixels <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+  df_PUs_sp <- readRDS(path_pixels);gc()
+  path_coverage <- paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds")
+  v_covered_PUs <- readRDS(path_coverage)
+
+  PAs_sel <- v_covered_PUs==1
+  df_sp_PUs <- data.frame(gbif_name = colnames(df_PUs_sp), 
+                          sum_pixels=colSums(df_PUs_sp), 
+                          sum_pixels_PAs = colSums(df_PUs_sp[PAs_sel,]))
+
+  in_lucc <- paste0(in_path, "future_LUCC_datasets/LUCC_human_dominated_SSPs_RCPs_binary/")
+  path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T)
+  df_PUs_lucc_fy <- readRDS(path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T))
+  
+  for (tmp_name in colnames(df_PUs_lucc_fy)) {
+    tmp_name_PAs <- paste0(tmp_name, "_PAs")
+    tmp_lucc <- df_PUs_lucc_fy[,tmp_name]
+    tmp_lucc_sel <- tmp_lucc==0
+    tmp_lucc_PAs_sel <- tmp_lucc_sel & PAs_sel
+    df_lucc_sel <- df_PUs_sp[tmp_lucc_sel,]
+    df_lucc_PAs_sel <- df_PUs_sp[tmp_lucc_PAs_sel,]
+    df_sp_PUs <- df_sp_PUs %>% 
+      mutate(!!tmp_name:=colSums(df_lucc_sel),
+             !!tmp_name_PAs:=colSums(df_lucc_PAs_sel))
+    gc()
+  }
+  
+  rm(df_lucc_sel);gc()
+  rm(df_lucc_PAs_sel);gc()
+  saveRDS(df_sp_PUs, out_rds)
+  rm(df_PUs_lucc_fy);rm(tmp_PUs_lucc_fy)
+}
+
+out_csv <- paste0(dirname(out_rds), "/Tab2_LUCC_impact_covered_species_3372_within_PAs.csv")
+if (!file.exists(out_csv)) {
+
+  df_sp_PUs <- readRDS(out_rds) %>%
+    select(-matches("all_|gbif_name"))
+
+  df_sp_PAs <- df_sp_PUs %>%
+    select(matches("PA")) %>%
+    filter(sum_pixels_PAs!=0) %>%
+    rowwise() %>%
+    mutate(across(everything(), ~ ifelse(. != 0, ./sum_pixels_PAs, 0))) %>%
+    ungroup() %>%
+    select(-sum_pixels_PAs) %>% 
+    mutate(across(where(is.numeric), ~ (1-.)))
+
+   df_mean <- data.frame(matrix(NA, nrow=ncol(df_sp_PAs), ncol= 7)) %>% 
+     rename_with( ~ c("scenario", 
+                      "No_sp_habitat_loss", "Prop_No_sp_habitat_loss(%)",
+                      "No_sp_extinct","Prop_No_sp_extinct(%)",
+                      "Mean_Prop_habitat_change(%)","SD_Prop_habitat_change(%)")) %>% 
+     mutate(scenario=colnames(df_sp_PAs))
+
+   for (tmp_r in 1:ncol(df_sp_PAs)) {
+     tmp_df <- df_sp_PAs[,tmp_r] %>% pull(.)
+     tmp_v <- c(sum(tmp_df!=0), 
+                sum(tmp_df!=0)/nrow(df_sp_PAs)*100, 
+                sum(tmp_df==1),
+                sum(tmp_df==1)/nrow(df_sp_PAs)*100,
+                mean(tmp_df)*100,
+                sd(tmp_df)*100)
+     df_mean[tmp_r,2:7] <- tmp_v
+   }
+
+   col_mean <- c("Mean",colMeans(df_mean[,-1]))
+   col_sd <- c("SD", apply(df_mean[,-1], 2, sd))
+
+   df_mean_PAs <- rbind(df_mean,col_mean,col_sd) %>% 
+     mutate(across(-scenario, as.numeric)) %>% 
+     mutate(across(where(is.numeric), ~ round(., digits = 2)))
+
+   my_stat <- c("No. of species with habitat loss",
+                "Prop. of No. of species with habitat loss(%)",
+                "No. of species Extinction",
+                "Prop. of No. of species Extinction(%)",
+                "Mean Prop. of habitat loss(%)",
+                "SD of Prop. of habitat loss PAs(%)")
+
+   df_PAs <- t(df_mean_PAs) %>% 
+     data.frame(.) %>% 
+     `colnames<-`(df_mean_PAs$scenario) %>% 
+     .[-1,] %>% 
+     mutate("land-use_change" = my_stat) %>% 
+     select(matches("land-use"), everything())
+   rownames(df_PAs) <- NULL
+
+   write.csv(df_PAs, out_csv)
+}
+
+```
+
+# 3 Proportion of habitat loss for each of 3551 endemic species in the PMB by 2050
+
+```{r}
+
+future_years <- 2050
+out_rds <- paste0(out_path, "result_5_land_use_change_impact_on_conservation/lucc_impact_on_covered_species_within_PAs_",paste0(future_years,collapse = "_"),".rds")
+
+if (!file.exists(out_rds)) {
+
+  path_pixels <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+  df_PUs_sp <- readRDS(path_pixels);gc()
+  path_coverage <- paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds")
+  v_covered_PUs <- readRDS(path_coverage)
+
+  PAs_sel <- v_covered_PUs==1
+  df_sp_PUs <- data.frame(gbif_name = colnames(df_PUs_sp), 
+                          sum_pixels=colSums(df_PUs_sp), 
+                          sum_pixels_PAs = colSums(df_PUs_sp[PAs_sel,]))
+
+  in_lucc <- paste0(in_path, "future_LUCC_datasets/LUCC_human_dominated_SSPs_RCPs_binary/")
+  path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T)
+  df_PUs_lucc_fy <- readRDS(path_lucc_fy <- list.files(in_lucc, paste0(".*",future_years,"_valid.rds"), full.names = T))
+  
+  for (tmp_name in colnames(df_PUs_lucc_fy)) {
+    tmp_name_PAs <- paste0(tmp_name, "_PAs")
+    tmp_lucc <- df_PUs_lucc_fy[,tmp_name]
+    tmp_lucc_sel <- tmp_lucc==0
+    tmp_lucc_PAs_sel <- tmp_lucc_sel & PAs_sel
+    df_lucc_sel <- df_PUs_sp[tmp_lucc_sel,]
+    df_lucc_PAs_sel <- df_PUs_sp[tmp_lucc_PAs_sel,]
+    df_sp_PUs <- df_sp_PUs %>% 
+      mutate(!!tmp_name:=colSums(df_lucc_sel),
+             !!tmp_name_PAs:=colSums(df_lucc_PAs_sel))
+    gc()
+  }
+  
+  rm(df_lucc_sel);gc()
+  rm(df_lucc_PAs_sel);gc()
+  saveRDS(df_sp_PUs, out_rds)
+  rm(df_PUs_lucc_fy);rm(tmp_PUs_lucc_fy)
+}
+
+
+out_csv <- paste0(dirname(out_rds), "/Tab3_LUCC_impact_endemic_species_3551_within_PMB.csv")
+if (!file.exists(out_csv)) {
+  
+  df_sp_PUs <- readRDS(out_rds) %>%
+    select(-matches("all_|gbif_name"))
+  
+  df_sp_PMB <- df_sp_PUs %>%
+    select(-matches("PA")) %>%
+    rowwise() %>%
+    mutate(across(everything(), ~ ifelse(. != 0, ./sum_pixels, 0))) %>%
+    ungroup() %>%
+    select(-sum_pixels)  %>% 
+    mutate(across(where(is.numeric), ~ (1-.)))
+  
+  df_mean <- data.frame(matrix(NA, nrow=ncol(df_sp_PMB), ncol= 7)) %>% 
+    rename_with( ~ c("scenario", 
+                     "No_sp_habitat_loss", "Prop_No_sp_habitat_loss(%)",
+                     "No_sp_extinct","Prop_No_sp_extinct(%)",
+                     "Mean_Prop_habitat_change(%)","SD_Prop_habitat_change(%)")) %>% 
+    mutate(scenario=colnames(df_sp_PMB))
+     
+  for (tmp_r in 1:ncol(df_sp_PMB)) {
+     tmp_df <- df_sp_PMB[,tmp_r] %>% pull(.)
+     tmp_v <- c(sum(tmp_df!=0), 
+                sum(tmp_df!=0)/nrow(df_sp_PMB)*100, 
+                sum(tmp_df==1),
+                sum(tmp_df==1)/nrow(df_sp_PMB)*100,
+                mean(tmp_df)*100,
+                sd(tmp_df)*100)
+     df_mean[tmp_r,2:7] <- tmp_v
+  }
+     
+   col_mean <- c("Mean",colMeans(df_mean[,-1]))
+   col_sd <- c("SD", apply(df_mean[,-1], 2, sd))
+   
+   df_mean_PMB <- rbind(df_mean,col_mean,col_sd) %>% 
+     mutate(across(-scenario, as.numeric)) %>% 
+     mutate(across(where(is.numeric), ~ round(., digits = 2)))
+   
+   my_stat <- c("No. of species with habitat loss",
+                "Prop. of No. of species with habitat loss(%)",
+                "No. of species Extinction",
+                "Prop. of No. of species Extinction(%)",
+                "Mean Prop. of habitat loss(%)",
+                "SD of Prop. of habitat loss PAs(%)")
+   
+   df_PMB <- t(df_mean_PMB) %>% 
+     data.frame(.) %>% 
+     `colnames<-`(df_mean_PMB$scenario) %>% 
+     .[-1,] %>% 
+     mutate("land-use_change" = my_stat) %>% 
+     select(matches("land-use"), everything())
+   rownames(df_PMB) <- NULL
+   
+   write.csv(df_PMB, out_csv)
+}
+
+```
+

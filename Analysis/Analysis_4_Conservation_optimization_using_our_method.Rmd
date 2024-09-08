@@ -1,0 +1,509 @@
+---
+title: "Analysis 4: Conservation optimization using our method"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory 
+setwd(my_wd <- 'path/to/your/data/dir/') 
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(dplyr)
+library(reshape2)
+library(terra)
+
+```
+
+# 1 Prepare the PUs and mark unsuitable PUs for optimization
+
+```{r}
+
+out_rds <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/data1_unsuitable_PUs_info_richness_PAs_LUCC_SSPs_RCPs_all.rds")
+
+if (!file.exists(out_rds)) {
+  
+  path_PU_sp_binary <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+  path_PAs <- paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds")
+  
+  df_PAs <- readRDS(path_PAs) %>% data.frame() %>% setNames(paste0("PAs"))
+  df_PU_sp_binary <- readRDS(path_PU_sp_binary)
+  df_richness <- data.frame(richness=rowSums(df_PU_sp_binary))
+  df_richness <- df_richness %>% mutate(richness=ifelse(richness>0,0,1))
+  rm(df_PU_sp_binary);gc()
+  
+  folder_lucc <- paste0(in_path, "future_LUCC_datasets/LUCC_human_dominated_SSPs_RCPs_binary//")
+  pattern_lucc <- paste0("LC_potentiality_human_dominated_SSPs_RCPs",".*2050.*valid.rds$")
+  path_lucc <- list.files(folder_lucc, pattern_lucc, full.names = T)
+  
+  df_lucc <- NA
+  for (i in seq(path_lucc)) {
+    tmp_rds_lucc <- readRDS(path_lucc[i])
+    df_lucc <- cbind(df_lucc, tmp_rds_lucc)
+  }
+  df_lucc <- df_lucc %>% data.frame() %>% select(-df_lucc)
+  df_PUs_unsuit <- cbind(df_richness, df_PAs, df_lucc)
+  
+  saveRDS(df_PUs_unsuit, out_rds)
+}
+
+```
+
+# 2 Prepare candidate PUs under different optimization strategies
+
+```{r}
+
+in_rds <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/data1_unsuitable_PUs_info_richness_PAs_LUCC_SSPs_RCPs_all.rds")
+df_PUs_unsuit <- readRDS(in_rds)
+df_riPAs <- df_PUs_unsuit %>% 
+  select(matches("richness|PAs"))
+df_lucc_all <- df_PUs_unsuit %>% 
+  select(-matches("richness|PAs"))
+
+for (tmp_col_lucc in colnames(df_lucc_all)) {
+  out_rds <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/data2_unsuitable_PUs_info_three_strategies_",tmp_col_lucc,".rds")
+  if(!file.exists(out_rds)){
+    df_PUs_sp <- df_riPAs %>% 
+      bind_cols(select(df_lucc_all, starts_with(tmp_col_lucc)))
+    
+    ###################################################################
+    # strategy 1: without considering human-dominated land-use change #
+    ###################################################################
+    
+    # lock PUs - PUs with current PAs (PAs ==1)
+    # or strategy1_lock <- df_PUs_sp[,"PAs"] ==1
+    strategy1_lock <- (df_PUs_sp %>% pull("PAs")) ==1
+    df_strategy1_lock <- df_PUs_sp[strategy1_lock,]
+    
+    # unsuitabale PUs with richness == 1 & PAs ==0
+    # strategy1_unsu <- df_PUs_sp[,"richness"]==1 & df_PUs_sp[,"PAs"]==0
+    strategy1_unsu <- (df_PUs_sp %>% pull("richness") == 1) & 
+      (df_PUs_sp %>% pull("PAs") == 0)
+    df_strategy1_unsu <- df_PUs_sp[strategy1_unsu,]
+              
+    # final PUs by spcies matrix = ALL-lock PUs - unsuitabl PUs
+    # strategy1_PUs <- df_PUs_sp[,"richness"]==0 & df_PUs_sp[,"PAs"]==0
+    strategy1_PUs <- df_PUs_sp %>% pull("richness") == 0 & 
+      df_PUs_sp %>% pull("PAs") == 0
+    df_strategy1_PUs <- df_PUs_sp[strategy1_PUs,]
+    
+    # check 
+    nrow(df_PUs_sp)==nrow(df_strategy1_PUs)+nrow(df_strategy1_unsu)+nrow(df_strategy1_lock)
+    
+    #################################################################################
+    # strategy 2: considering  human-dominated land-use change outside existing PAs #
+    #################################################################################
+    
+    # lock PUs - PUs with current PAs (PAs==1)
+    # strategy2_lock <- df_PUs_sp[,"PAs"]==1
+    strategy2_lock <- df_PUs_sp %>% pull("PAs") ==1 
+    df_strategy2_lock <- df_PUs_sp[strategy2_lock,]
+  
+    # unsuitabale PUs with (richness==1 & PAs==0) | (lucc ==1 & PAs ==0)
+    # strategy2_unsu <- (df_PUs_sp[,"richness"]==1 & df_PUs_sp[,"PAs"]==0)|
+    #   (df_PUs_sp[,tmp_col_lucc]==1 & df_PUs_sp[,"PAs"]==0)
+    strategy2_unsu <- ((df_PUs_sp %>% pull("richness") == 1) &
+      (df_PUs_sp %>% pull("PAs") == 0)) |
+      ((df_PUs_sp %>% pull(tmp_col_lucc) == 1) &
+      (df_PUs_sp %>% pull("PAs") == 0))
+    df_strategy2_unsu <- df_PUs_sp[strategy2_unsu,]
+              
+    # final PUs by spcies matrix = ALL-lock PUs - unsuitabl PUs
+    # strategy2_PUs <- df_PUs_sp[,"richness"]!= 1 & df_PUs_sp[,"PAs"]!=1 & df_PUs_sp[,tmp_col_lucc]!=1
+    strategy2_PUs <- (df_PUs_sp %>% pull("richness") != 1) &
+      (df_PUs_sp %>% pull("PAs") != 1) &
+      (df_PUs_sp %>% pull(tmp_col_lucc) != 1)
+    df_strategy2_PUs <- df_PUs_sp[strategy2_PUs,]
+    
+    # check 
+    nrow(df_PUs_sp)==nrow(df_strategy2_PUs)+nrow(df_strategy2_unsu)+nrow(df_strategy2_lock)
+    
+    ##################################################################################
+    # strategy 3: considering human-dominated land-use change inside and outside PAs #
+    ##################################################################################
+    
+    # lock PUs - PUs with current PAs and without lucc change (PAs_2050 ==1 & lucc != 1)
+    # strategy3_lock <- df_PUs_sp[,"PAs"]==1 & df_PUs_sp[,tmp_col_lucc]!=1
+    strategy3_lock <- (df_PUs_sp %>% pull("PAs") == 1) &
+      (df_PUs_sp %>% pull(tmp_col_lucc) != 1)
+    df_strategy3_lock <- df_PUs_sp[strategy3_lock,]
+    
+    # unsuitabale PUs with
+    # strategy3_unsu <- ((df_PUs_sp[,"richness"]==1|
+    #                      df_PUs_sp[, "PAs"]==1|
+    #                      df_PUs_sp[,tmp_col_lucc]==1)) & !(strategy3_lock)
+    strategy3_unsu <- ((df_PUs_sp %>% pull("richness") == 1) |
+      (df_PUs_sp %>% pull("PAs") == 1) |
+      (df_PUs_sp %>% pull(tmp_col_lucc) ==1)) & !(strategy3_lock)
+    df_strategy3_unsu <- df_PUs_sp[strategy3_unsu,]
+              
+    # final PUs by spcies matrix = ALL-lock PUs - unsuitabl PUs
+    # strategy3_PUs <- df_PUs_sp[,"richness"]!= 1 & df_PUs_sp[,"PAs"]!=1 & df_PUs_sp[,tmp_col_lucc]!=1  
+    strategy3_PUs <- (df_PUs_sp %>% pull("richness") != 1) &
+      (df_PUs_sp %>% pull("PAs") != 1) &
+      (df_PUs_sp %>% pull(tmp_col_lucc) != 1)
+    df_strategy3_PUs <- df_PUs_sp[strategy3_PUs,]
+    
+    # check 
+    nrow(df_PUs_sp)==nrow(df_strategy3_PUs)+nrow(df_strategy3_unsu)+nrow(df_strategy3_lock)
+    
+    df_PUs_sp <- df_PUs_sp %>% 
+      mutate(strategy1 = ifelse(strategy1_lock, 0, NA),
+             strategy1 = ifelse(strategy1_unsu, -1, strategy1), 
+             strategy2 = ifelse(strategy2_lock, 0, NA),
+             strategy2 = ifelse(strategy2_unsu, -1, strategy2), 
+             strategy3 = ifelse(strategy3_lock, 0, NA),
+             strategy3 = ifelse(strategy3_unsu, -1, strategy3))
+    
+    saveRDS(df_PUs_sp, out_rds)
+  }
+}
+
+```
+
+# 3 Prepare data for species infomation
+
+```{r}
+
+out_rds <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/data3_species_info_per_PUs.rds")
+
+if (!file.exists(out_rds)) {
+  in_rds <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+  in_csv <- paste0(in_path,"/species_info/species_list.csv")
+  df_sp_type <- read.csv(in_csv, row.names = 1)
+  PUs_sp <- readRDS(in_rds)
+  df_sp_No <- colnames(PUs_sp) %>% 
+    data.frame() %>% 
+    setNames("gbif_name") %>% 
+    mutate(total_pixels = colSums(PUs_sp),
+           priority_pixels = 1/total_pixels,
+           nonProt_pixels = NA, 
+           threat_sp = ifelse(df_sp_type$threatened=="Non-Threatened",0,1),
+           law_sp = ifelse(df_sp_type$prolevel=="Non-NaPro",0,1))
+  saveRDS(df_sp_No,out_rds)
+}
+
+```
+
+# 4 Prepare Rdata for optimzation of priority areas
+
+```{r}
+
+out_Rdata <- paste0(out_path, "result_4_conservation_optimiztion_our_method/prepared_datasets/source_datasets_optimization.RData")
+
+if(!file.exists(out_Rdata)){
+  my_folder <- paste0(out_path,"result_4_conservation_optimiztion_our_method/prepared_datasets/")
+  df1_PUs_sp <- readRDS(paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")) %>% 
+    as.matrix()
+  df2_spinfo <- readRDS(paste0(my_folder, "data3_species_info_per_PUs.rds"))
+  
+  # strategy1: without lucc change
+
+  ff_PUs_mark1 <- list.files(my_folder, "data2.*all.*rds$", full.names = T)
+  # strategy2: considing lucc change in optimization
+  # ensemble SSPs RCPs + each SSPs RCPs
+  ff_PUs_mark2 <- c(list.files(my_folder, "data2.*all.*rds$", full.names = T),
+                    list.files(my_folder, "data2.*strategies_SSP.*rds$", full.names = T))
+  ff_PUs_mark3 <- c(list.files(my_folder, "data2.*all.*rds$", full.names = T),
+                    list.files(my_folder, "data2.*strategies_SSP.*rds$", full.names = T))
+  
+  path_df_strategy <- data.frame(matrix(NA, nrow=length(ff_PUs_mark2), ncol=3)) %>% 
+    setNames(c("strategy1", "strategy2", "strategy3")) %>% 
+    mutate(strategy1 = c(ff_PUs_mark1, rep(NA, length(ff_PUs_mark2)-length(ff_PUs_mark1))),
+           strategy2 = ff_PUs_mark2,
+           strategy3 = ff_PUs_mark3)
+  save(df1_PUs_sp,df2_spinfo,path_df_strategy, file=out_Rdata)
+}
+   
+```
+
+# 5 Build our optimization method to iteratively select PUs
+
+```{r}
+
+optimization_PAs <- function(strategy, SSP_RCP, target, path_out_folder, path_RData,
+                             parallel=FALSE) {
+  strategies <-  paste0(c("strategy1","strategy2","strategy3"), collapse = "|")
+  SSPs_RCPs <-  paste0(c("all_SSPs_RCPs","SSP1_RCP26","SSP2_RCP45",
+                      "SSP3_RCP70", "SSP5_RCP85"), collapse = "|")
+  targets <-  paste0(c(30, 50), collapse = "|")
+  if (!missing(strategy) & grepl(strategy,strategies)) {
+    if ((!missing(SSP_RCP) & grepl(SSP_RCP, SSPs_RCPs))|((missing(SSP_RCP)&grepl(target,targets)))) {
+      if (!missing(target)& grepl(target, targets)) {
+    
+        out_folder <- paste0(path_out_folder, strategy, "_target", target, "_",SSP_RCP,"//")
+        out_final <- paste0(out_folder, "final_results//")
+        out_process <- paste0(out_folder, "process_results//")  
+        if(!file.exists(out_folder)){dir.create(out_folder, recursive = TRUE)}
+        if(!file.exists(out_final)){dir.create(out_final, recursive = TRUE)}
+        if(!file.exists(out_process)) {dir.create(out_process, recursive = TRUE)}
+        
+        if (length(list.files(out_final, "_final.rds$"))==0) {
+          if (parallel) {
+            log_file <- file(paste0(out_folder, strategy, "_", SSP_RCP, "_", target, ".log"), "a")
+          } else {
+            log_file <- ""
+          }
+          
+          load(path_RData)
+          if (strategy=="strategy1") { 
+            SSP_RCP <- "all_SSPs_RCPs"
+            df2_spinfo$unsu_pixels <- 0
+          } 
+          path_df3_sel <- grepl(paste0(SSP_RCP,"_20",target), path_df_strategy[,strategy])
+          path_df3 <- path_df_strategy[path_df3_sel,strategy]
+          df3_PUs_mark <- readRDS(path_df3) %>% 
+            select(matches(paste0("SSP|",strategy))) %>% 
+            setNames(c("LU_poten", "PUs_ID")) %>% 
+            mutate(PUs_ID_new = PUs_ID)
+        
+          cat(paste0("Start: ",strategy, "_", SSP_RCP, "_",target, "\n"), file = log_file, append = TRUE)
+          thre_law_sp <- df2_spinfo$gbif_name[df2_spinfo$threat_sp==1| df2_spinfo$law_sp==1]
+          priority_mat_occ <- as.numeric(df2_spinfo$priority_pixels) %>% 
+            as.matrix()
+          
+          if (strategy!="strategy1") {
+            sel_PUs_unsu <- (df3_PUs_mark$PUs_ID==-1) & (!is.na(df3_PUs_mark$PUs_ID))
+            unsu_PUs_sp_matrix <-  df1_PUs_sp[sel_PUs_unsu,]
+            df2_spinfo$unsu_pixels <- colSums(unsu_PUs_sp_matrix)
+            rm(unsu_PUs_sp_matrix)
+          } else {
+            df2_spinfo$unsu_pixels <- 0
+          }
+          
+          
+          if (length(list.files(out_process))!=0) {
+            l <- 1
+            if (length(list.files(out_process))==1) {
+              i <- as.numeric(gsub(paste0("optimization_",strategy,"_",SSP_RCP,"_",target,"_Iteration|\\.rds"),
+                                   "",list.files(out_process)))
+            } else {
+              i_first <- min(as.numeric(gsub(paste0("optimization_",strategy,"_",SSP_RCP,"_",target,"_Iteration|\\.rds"), "",list.files(out_process))))
+              n <- ceiling(i_first/100)
+              i <-  (length(list.files(out_process))-n)*100
+            }
+            rds_path <- list.files(out_process, paste0("Iteration",i,".rds"), full.names=T)
+            v_PUs <- readRDS(rds_path)
+            df3_PUs_mark$PUs_ID <- df3_PUs_mark$PUs_ID_new <- v_PUs
+            sel_PUs <- is.na(df3_PUs_mark$PUs_ID_new)
+            df_candidate_PUs <- df1_PUs_sp[sel_PUs,]
+            df1_PUs_sp <- path_df_strategy <- NULL; gc()
+          } else {
+            l=2
+            i=0
+            sel_PUs <- is.na(df3_PUs_mark$PUs_ID_new)
+            df_candidate_PUs <- df1_PUs_sp[sel_PUs,]
+            df1_PUs_sp <- path_df_strategy <- NULL; gc()
+          }
+          
+              
+      
+          df_PUs_scores <- data.frame(matrix(NA, nrow = nrow(df_candidate_PUs),ncol=4))
+          colnames(df_PUs_scores) <- c("LU_weight","rank","PUs_score","PU_score")
+          rownames(df_PUs_scores) <- rownames(df_candidate_PUs)
+          df_PUs_scores$LU_weight <- (1-df3_PUs_mark$LU_poten[sel_PUs])
+          gc()
+          
+          if (l==1) {
+            sel_score <- is.na(df_PUs_scores$rank)
+            unsu_sp <- df2_spinfo$gbif_name[df2_spinfo$unsu_pixels == df2_spinfo$total_pixels]
+            covered_sp <- colnames(df_candidate_PUs)[!colnames(df_candidate_PUs)%in% unsu_sp]
+            cols_covered_sp <- which(colnames(df_candidate_PUs) %in% covered_sp)
+            mat_candidate_PUs_covered_sp  <- df_candidate_PUs[, cols_covered_sp] %>% as.matrix()
+            mat_priority_PUs_covered_sp <- priority_mat_occ[cols_covered_sp] %>% as.matrix()
+          
+            df_PUs_scores$PUs_score <- as.numeric(mat_candidate_PUs_covered_sp %*% mat_priority_PUs_covered_sp);gc()
+          
+            # mat_candidate_PUs_uc <- t(mat_candidate_PUs_uc)
+            # mat_candidate_PUs_uc <- t(mat_candidate_PUs_uc/df2_spinfo$total_pixels[covered_sp])
+            mat_candidate_PUs_uc <- mat_candidate_PUs_covered_sp
+            total_pixel_covered_sp <- df2_spinfo$total_pixels[covered_sp]
+            for (c in 1:ncol(mat_candidate_PUs_uc)) {
+              tmp_rate <- mat_candidate_PUs_uc[,c]/total_pixel_covered_sp[c]
+              tmp_rate[tmp_rate<1] <- 0
+              tmp_rate[is.na(tmp_rate)] <- 0
+              mat_candidate_PUs_uc[,c] <- tmp_rate
+              if(c==1){cat("start protected more habitats \n", file = log_file, append = TRUE)}
+              if (!parallel) { cat(c, "\r") }
+            }
+            df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_uc);gc()
+            rm(mat_candidate_PUs_uc)
+          
+            cover_tl_sp <- thre_law_sp[thre_law_sp %in% covered_sp]
+            cols_cover_tl_sp <- which(colnames(df_candidate_PUs) %in% cover_tl_sp)
+            mat_candidate_PUs_cover_tl  <- df_candidate_PUs[,cols_cover_tl_sp] %>% as.matrix()
+            mat_priority_PUs_cover_tl  <- priority_mat_occ[cols_cover_tl_sp] %>% as.matrix()
+            df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_cover_tl %*% mat_priority_PUs_cover_tl) %>% as.numeric()
+            rm(mat_candidate_PUs_cover_tl);rm(mat_priority_PUs_cover_tl)
+            rm(mat_candidate_PUs_covered_sp);rm(mat_priority_PUs_covered_sp);rm(priority_mat_occ)
+            gap_sp <- NULL
+            rm(df_candidate_PUs)
+          }
+          
+          prot_pixel <- sum(df3_PUs_mark$PUs_ID!=-1,na.rm = T)
+          target_pixel <- ceiling(nrow(df3_PUs_mark) * (target/100))
+          number_loops <- ceiling((target_pixel-prot_pixel))    
+          start.time <- Sys.time()
+          
+          for (l in 1:number_loops) {
+            if (prot_pixel <= target_pixel) {
+              
+              # default setting
+              loop.startime <- Sys.time()
+              i <- i+1
+              
+              if (length(list.files(out_process))==0) {
+                sel_score <- is.na(df_PUs_scores$rank)
+    
+                df_PUs_scores$PUs_score[!sel_score] <- df_PUs_scores$PU_score[!sel_score] <- 
+                  df_PUs_scores$PUs_score_unique[!sel_score] <- df_PUs_scores$PUs_score_tl[!sel_score] <- NA
+                
+                df2_spinfo$nonProt_pixels <- colSums(df_candidate_PUs)
+                df2_spinfo$nonProt_unsu_pixels <- df2_spinfo$nonProt_pixels+df2_spinfo$unsu_pixels
+                gap_sp <- df2_spinfo$gbif_name[df2_spinfo$nonProt_unsu_pixels == df2_spinfo$total_pixels]
+                unsu_sp <- df2_spinfo$gbif_name[df2_spinfo$unsu_pixels == df2_spinfo$total_pixels]
+                gap_sp <- gap_sp[!gap_sp%in% unsu_sp]
+                cols_gap_sp <- which(colnames(df_candidate_PUs) %in% gap_sp)
+            
+                mat_candidate_PUs_gapsp <- df_candidate_PUs[,cols_gap_sp] %>% as.matrix()
+                mat_priority_PUs_gapsp <- priority_mat_occ[cols_gap_sp] %>% as.matrix()
+                df_PUs_scores$PUs_score[sel_score] <- as.numeric(mat_candidate_PUs_gapsp %*% mat_priority_PUs_gapsp);gc()
+                
+                mat_candidate_PUs_gu <- t(mat_candidate_PUs_gapsp)
+                mat_candidate_PUs_gu <- t(mat_candidate_PUs_gu/df2_spinfo$total_pixels[gap_sp])
+                mat_candidate_PUs_gu[mat_candidate_PUs_gu < 1] <- 0
+                mat_candidate_PUs_gu[is.na(mat_candidate_PUs_gu)] <- 0
+                
+                df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_gu);gc() 
+                rm(mat_candidate_PUs_gu)
+                
+                unpro_tl_sp <- thre_law_sp[thre_law_sp %in% gap_sp]
+                cols_unpro_tl_sp <- which(colnames(df_candidate_PUs) %in% unpro_tl_sp)
+                mat_candidate_PUs_gapsp_tl  <- df_candidate_PUs[,cols_unpro_tl_sp] %>% as.matrix()
+                mat_priority_PUs_gapsp_tl  <- priority_mat_occ[cols_unpro_tl_sp] %>% as.matrix()
+                df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_gapsp_tl %*% mat_priority_PUs_gapsp_tl) %>% as.numeric()
+                if(length(gap_sp)==0){
+                  saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_process, "optimization_",strategy, "_", SSP_RCP, "_",target,"_Iteration",i-1, ".rds"))
+                }          
+                if (length(list.files(out_process))==1) {
+                  df_PUs_scores$PU_score <- NULL
+                  df_PUs_scores$PUs_score <- df_PUs_scores$PUs_score_unique <- df_PUs_scores$PUs_score_tl <- NA
+                  covered_sp <- colnames(df_candidate_PUs)[!colnames(df_candidate_PUs)%in% unsu_sp]
+                  cols_covered_sp <- which(colnames(df_candidate_PUs) %in% covered_sp)
+                  mat_candidate_PUs_covered_sp  <- df_candidate_PUs[, cols_covered_sp] %>% as.matrix()
+                  mat_priority_PUs_covered_sp <- priority_mat_occ[cols_covered_sp] %>% as.matrix()
+      
+                  df_PUs_scores$PUs_score[sel_score] <- as.numeric(mat_candidate_PUs_covered_sp %*% mat_priority_PUs_covered_sp);gc()
+      
+                  # mat_candidate_PUs_uc <- t(mat_candidate_PUs_uc)
+                  # mat_candidate_PUs_uc <- t(mat_candidate_PUs_uc/df2_spinfo$total_pixels[covered_sp])
+                  mat_candidate_PUs_uc <- mat_candidate_PUs_covered_sp
+                  total_pixel_covered_sp <- df2_spinfo$total_pixels[covered_sp]
+                  for (c in 1:ncol(mat_candidate_PUs_uc)) {
+                    tmp_rate <- mat_candidate_PUs_uc[,c]/total_pixel_covered_sp[c]
+                    tmp_rate[tmp_rate<1] <- 0
+                    tmp_rate[is.na(tmp_rate)] <- 0
+                    mat_candidate_PUs_uc[,c] <- tmp_rate
+                    if(c==1){cat("start protected more habitats \n", file = log_file, append = TRUE)}
+                    if (!parallel) { cat(c, "\r") }
+                  }
+                  df_PUs_scores$PUs_score_unique[sel_score] <- rowSums(mat_candidate_PUs_uc);gc()
+                  rm(mat_candidate_PUs_uc)
+      
+                  cover_tl_sp <- thre_law_sp[thre_law_sp %in% covered_sp]
+                  cols_cover_tl_sp <- which(colnames(df_candidate_PUs) %in% cover_tl_sp)
+                  mat_candidate_PUs_cover_tl  <- df_candidate_PUs[,cols_cover_tl_sp] %>% as.matrix()
+                  mat_priority_PUs_cover_tl  <- priority_mat_occ[cols_cover_tl_sp] %>% as.matrix()
+                  df_PUs_scores$PUs_score_tl[sel_score] <- (mat_candidate_PUs_cover_tl %*% mat_priority_PUs_cover_tl) %>% as.numeric()
+                  rm(mat_candidate_PUs_cover_tl);rm(mat_priority_PUs_cover_tl)
+                  rm(mat_candidate_PUs_covered_sp);rm(mat_priority_PUs_covered_sp);rm(priority_mat_occ)
+                  rm(df_candidate_PUs)
+                }
+              }
+              
+              
+              if ((strategy!="strategy1") & (SSP_RCP=="all_SSPs_RCPs")) {
+                df_PUs_scores$PUs_score <- df_PUs_scores$PUs_score * df_PUs_scores$LU_weight
+                df_PUs_scores$PUs_score_unique <- df_PUs_scores$PUs_score_unique * df_PUs_scores$LU_weight
+                df_PUs_scores$PUs_score_tl <- df_PUs_scores$PUs_score_tl * df_PUs_scores$LU_weight
+              }
+              
+              sel_score <- is.na(df_PUs_scores$rank)   
+              max_score <- max(df_PUs_scores$PUs_score[sel_score])
+              sel_rows <- which(df_PUs_scores$PUs_score==max_score & is.na(df_PUs_scores$rank))
+              
+              if (length(sel_rows)==1) {
+                sel_PU <- rownames(df_PUs_scores)[sel_rows]
+              } else {
+                max_unique <- max(df_PUs_scores$PUs_score_unique[sel_rows])
+                ord_rows_unique <- which(df_PUs_scores$PUs_score_unique[sel_rows]==max_unique)
+                sel_rows_unique <- sel_rows[ord_rows_unique]
+                if (length(sel_rows_unique)==1) {
+                  sel_PU <- rownames(df_PUs_scores)[sel_rows_unique]
+                } else {
+                  ord_rows_tl <- which.max(df_PUs_scores$PUs_score_tl[sel_rows])
+                  sel_rows_tl <- sel_rows[ord_rows_tl]
+                  sel_PU <- rownames(df_PUs_scores)[sel_rows_tl]
+                }
+              }
+              
+              df3_PUs_mark$PUs_ID_new[rownames(df3_PUs_mark)==sel_PU] <- i
+              df_PUs_scores$rank[rownames(df_PUs_scores)==sel_PU] <- i
+              if(length(gap_sp)>0){df_candidate_PUs <- df_candidate_PUs[rownames(df_candidate_PUs)!=sel_PU,]}
+              prot_pixel <- sum(df3_PUs_mark$PUs_ID_new!=-1,na.rm = T)
+             
+              if (length(gap_sp)==0){
+                if ((prot_pixel != target_pixel)){
+                  if (i %% 100 == 0) {
+                    df3_PUs_mark$PUs_ID_new[is.na(df3_PUs_mark$PUs_ID)] <- df_PUs_scores$rank
+                    saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_process, "optimization_",strategy, "_", SSP_RCP, "_",target,"_Iteration",i, ".rds"))
+                  }
+                } else if (prot_pixel == target_pixel) {
+                  df3_PUs_mark$PUs_ID_new[is.na(df3_PUs_mark$PUs_ID)] <- df_PUs_scores$rank
+                  saveRDS(df3_PUs_mark$PUs_ID_new, paste0(out_final, "optimization_",strategy, "_", SSP_RCP, "_",target,"_Iteration",i, "_final.rds"))
+                }
+              }
+              loop.endtime <- Sys.time()
+
+              if(length(gap_sp)>0){
+                cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:", 
+              sum(df_PUs_scores$PUs_score[sel_score], na.rm = T), "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel,
+                    "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "strategy:", strategy, "target:", target, "SSP_RCP:",SSP_RCP,"dim:",dim(df_candidate_PUs), "\n",  file = log_file, append = TRUE)
+              } else {
+                cat("Iteration:",i,"unpro_sp:", length(gap_sp),"sum priority:",               sum(df_PUs_scores$PUs_score[sel_score], na.rm = T), "Remaining:",target_pixel-prot_pixel, "=", prot_pixel,"/",target_pixel, "time:", loop.endtime-loop.startime, "total time:",loop.endtime-start.time, "strategy:", strategy, "target:", target, "SSP_RCP:",SSP_RCP, "\n",  file = log_file, append = TRUE)
+              }
+              gc()
+            }
+          }
+        } else {
+          cat(paste0("\n Done: ",senario, "_", SSP_RCP, "_",target, "\n"), file = log_file, append = TRUE)
+        }
+      }
+    }
+  }
+}
+
+```
+
+# 6 Let's start using our method to optimize PAs expansion in the future
+
+```{r}
+
+strategies <- c("strategy1", "strategy2", "strategy3")
+SSPs_RCPs <- c("all_SSPs_RCPs","SSP1_RCP26","SSP2_RCP45", "SSP3_RCP70", "SSP5_RCP85")
+targets <- 50
+path_out_folder <- paste0(out_path,"result_4_conservation_optimiztion_our_method/")
+path_RData <- paste0(path_out_folder, "prepared_datasets/source_datasets_optimization.RData")
+for (strategy in strategies) { 
+  for (SSP_RCP in SSPs_RCPs) {
+    for (target in targets) {
+      print(paste0(strategy, "_", SSP_RCP, "_",target))
+      optimization_PAs(strategy, SSP_RCP, target, path_out_folder, path_RData)
+    }
+  }
+}
+
+```
+
+

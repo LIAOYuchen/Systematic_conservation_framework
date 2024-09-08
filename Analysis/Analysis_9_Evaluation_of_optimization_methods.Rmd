@@ -1,0 +1,356 @@
+---
+title: "Analysis 9: Evaluation of optimization methods"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(sf)
+library(terra)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+```
+
+# 1 Optimal optimization
+
+1. Without considering existing PAs and land-use change (as already prepared in analysis 8)
+2. With considering existing PAs but without considering land-use change  (as already prepared in analysis 4, optimization strategy 1)
+
+
+# 2 Zonation optimization
+
+```{r}
+
+# 1 Prepared PAs mask raster
+
+out_ras <- paste0(out_path,"result_9_evaluation_optimization_method/with_PAs_without_lucc.tif")
+if (!file.exists(out_ras)) {
+  v_PAs <- readRDS(paste0(in_path, "PAs_coverage/pixels_covered_by_PAs.rds"))
+  ras_PAs <- rast(paste0(in_path, "template_datasets/template.tif"))
+  ras_PAs[!is.na(ras_PAs)] <- v_PAs
+  writeRaster(ras_PAs, out_ras, filetype="GTiff",datatype="INT1U",
+                gdal=c("COMPRESS=DEFLATE","PREDICTOR=2"))
+}
+
+
+# 2 Creat projects and variants
+
+path_proj <- paste0(out_path,"result_9_evaluation_optimization_method/zonation_core_2050/")
+path_PAs_mask <- paste0(out_path,"result_9_evaluation_optimization_method/with_PAs_without_lucc.tif")
+
+scenarios <- c("scenario0","scenario1")
+SSPs_RCPs <- c("without_lucc","without_lucc")
+PAs_mask <- c("without_PAs","with_PAs")
+df_scenarios <- data.frame(scenarios=scenarios,PAs_mask=PAs_mask,
+                           SSPs_RCPs=SSPs_RCPs)
+df_proj <- df_scenarios %>% 
+  mutate(path_PAs_mask = c(NA,path_PAs_mask))
+
+my_variants <- c("ABF_algorithm", "CAZ_algorithm", "RMD_algorithm")
+my_spp_dir <- paste0(in_path, "range_maps_sp3551_2020_990m/")
+my_spp_pattern <- basename(list.files(my_spp_dir))
+
+for (i in 1:nrow(df_proj)) {
+  my_name <- paste0(paste0(df_proj[i,] %>% select(-"path_PAs_mask"), collapse = "-"))
+  path_myproj <- paste0(path_proj,my_name)
+  path_mymask <- df_proj$path_PAs_mask[i]
+  if (!file.exists(path_myproj)) {
+    create_zproject(name=my_name, dir=path_proj, variants=my_variants, spp_template_dir = my_spp_dir)
+    for (my_variant in my_variants) {
+      path_dat_myvariant <- paste0(path_myproj,"/",my_variant,"/",my_variant,".dat")
+      tmp_df_dat <- read_dat(path_dat_myvariant)
+      # change parameter 1
+      if (grepl("CAZ",my_variant)){
+        tmp_df_dat$Settings$'removal rule'=1
+      } else if (grepl("ABF",my_variant)) {
+        tmp_df_dat$Settings$'removal rule'=2
+      } else if (grepl("RMD",my_variant)) {
+        tmp_df_dat$Settings$'removal rule'=5
+      }
+      # change parameter 2
+      tmp_df_dat$Settings$'warp factor'= 1
+      # change parameter 3
+      if (!is.na(path_mymask)) {
+        tmp_df_dat$Settings$'use mask'=1
+        tmp_df_dat$Settings$'mask file'= path_mymask
+      }
+      write_dat(tmp_df_dat, path_dat_myvariant, overwrite=TRUE)
+      cat(paste(i, my_name, my_variant), "\r")
+    }
+  }
+}
+
+
+# 3 Running zonation
+
+my_variants <- c("ABF_algorithm", "CAZ_algorithm", "RMD_algorithm")
+path_myproj <- list.files(paste0(out_path,"result_9_evaluation_optimization_method/zonation_core_2050/"), full.names = T)
+path_myproj_algo <- list.files(path_myproj, "algorithm$", full.names = T)
+my_spp <- list.files(path_myproj_algo, "spp$", full.names = T)
+my_dat <- gsub("\\.spp", "\\.dat", my_spp)
+my_result <- paste0(gsub("\\.spp", "_out", my_spp),"/",gsub("\\.spp", "\\.txt",basename(my_spp)))
+my_tasks <- (1:length(my_result))[!file.exists(my_result)]
+
+for (i in 1:length(my_tasks)) {
+  system(command = paste("zig4 -r", my_dat[i], my_spp[i], my_result[i], 0, 0, 1 ,0))
+}
+
+```
+
+# 3 Prepare zonation results and our method result
+
+```{r}
+
+folder_zonation <- list.files(paste0(out_path, "result_9_evaluation_optimization_method/zonation_core_2050/"),".*without_lucc.*", full.names = T)
+folder_algorithm <- list.files(folder_zonation, "algorithm$", full.names = T)
+folder_algorithm_res <- list.files(folder_algorithm, "algorithm_out$", full.names = T)
+path_zonation <- list.files(folder_algorithm_res, "rank.compressed.tif$", full.names = T)
+name_zonation <- paste0(gsub("scenario|0-|1-|-990-2050|-without_lucc", "",
+                           basename(dirname(dirname(dirname(path_zonation))))),
+                      "_", gsub("\\.rank.compressed.tif", "", basename(path_zonation)))
+
+for (i in 1:length(path_zonation)) {
+  tmp_path <- path_zonation[i]
+  tmp_name <- name_zonation[i]
+  out_rds <- paste0(out_path, "result_9_evaluation_optimization_method/prepared_datasets_zonation_rank/zonation_",tmp_name,".rds")
+  if (sum(!file.exists(out_rds))!=0) {
+    tmp_ras <- rast(tmp_path)
+    df_rds <-  data.frame(values(tmp_ras)) %>% 
+      filter(complete.cases(.)) %>% 
+      setNames("value_z") %>% 
+      mutate(my_rank = rank(-value_z),
+             my_rank = ifelse(my_rank<=ceiling(nrow(.)*0.5), my_rank, NA)) %>% 
+      select(my_rank) %>% 
+      setNames(gsub("_algorithm","",tmp_name))
+    saveRDS(df_rds,out_rds)
+  }
+}
+
+out_rds_binary <- paste0(out_path, "result_9_evaluation_optimization_method/evaluation_optimization_method_binary.rds")
+out_rds <- paste0(out_path, "result_9_evaluation_optimization_method/evaluation_optimization_method.rds")
+out_all <- c(out_rds_binary, out_rds)
+
+in_PUs_sp_binary <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+in_PUs_sp <- paste0(in_path, "pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+
+if (sum(!file.exists(out_all))!=0) {
+
+  path_our_method_withoutPAs <- paste0(out_path, "result_8_effectiveness_comparison_optimal_random_reality/scenario0_target50_without_LUCC/final_results/optimization_scenario0_without_LUCC_50_Iteration251026_final.rds")
+  path_our_method_withPAs <- paste0(out_path, "result_4_conservation_optimiztion_our_method/scenario1_target50_all_SSPs_RCPs/final_results/optimization_scenario1_all_SSPs_RCPs_50_Iteration145246_final.rds")
+  path_our_method <- c(path_our_method_withoutPAs,path_our_method_withPAs)
+  name_our_method <- c("without_PAs_our_method","with_PAs_our_method")
+  
+  folder_zonation <- paste0(out_path,"result_9_evaluation_optimization_method/prepared_datasets_zonation_rank/")
+  path_zonation <- list.files(folder_zonation, "rds$", full.names = T)
+  name_zonation <- gsub("zonation_|_algorithm.rds", "", basename(path_zonation))
+  
+  path_all <- c(path_our_method, path_zonation)
+  name_all <- c(name_our_method, name_zonation)
+   
+  df_all <- readRDS(path_all[1])
+  df_all <- matrix(NA, nrow=length(df_all))
+  for (i in 1:length(path_all)) {
+    tmp_path <- path_all[i]
+    tmp_name <- name_all[i]
+    tmp_df <- readRDS(tmp_path) %>% 
+      data.frame() %>% 
+      setNames(tmp_name)
+    df_all <- cbind(df_all, tmp_df)
+  };gc();rm(tmp_df)
+  
+  if (sum(!file.exists(out_rds_binary))!=0) {
+    df_PUs_sp_binary <- readRDS(in_PUs_sp_binary)
+    df_all_binary <- df_all %>% 
+      select(-df_all) %>% 
+      cbind(., df_PUs_sp_binary)
+    saveRDS(df_all_binary, out_rds_binary)
+    rm(df_PUs_sp_binary);rm(df_all_binary)
+  }
+  if (sum(!file.exists(out_rds))!=0) {
+    df_PUs_sp <- readRDS(in_PUs_sp)
+    df_all <- df_all %>% 
+      select(-df_all) %>% 
+      cbind(., df_PUs_sp)
+    saveRDS(df_all, out_rds)
+    rm(df_PUs_sp);rm(df_all)
+  }
+}
+
+```
+
+# 4 Prepare datasets for evaluating the number of covered species
+
+```{r}
+
+out_rds <- paste0(out_path, "result_9_evaluation_optimization_method/evaluation_optimization_method_in_number_covered_species.rds")
+
+if(!file.exists(out_rds)) {
+  in_rds <- paste0(out_path, "result_9_evaluation_optimization_method/evaluation_optimization_method_binary.rds")
+  in_PUs_sp <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+  
+  gbif_name <- read.csv(paste0(in_path, "species_info/species_list.csv"),row = 1) %>% 
+    pull(gbif_name);gc()
+  df_sp <- readRDS(in_rds);gc()
+  df_info <- df_sp %>% 
+    select(-all_of(gbif_name))
+  df_sp <- df_sp %>% select(all_of(gbif_name));gc()
+  df_out <- data.frame(prop_area = seq(0,60,by=0.01))
+  Total_counts <- nrow(df_sp)
+  all_names <- colnames(df_info)
+  for (tmp_n in 1:length(all_names)) {
+    tmp_col <- all_names[tmp_n]
+    tmp_df <- df_info %>%
+      select(all_of(tmp_col)) %>% 
+      setNames("scenario") %>% 
+      cbind(.,df_sp) %>% 
+      filter(!scenario==-1&!is.na(scenario)) %>% 
+      arrange(scenario) %>% 
+      mutate(rank_sce = rank(scenario, ties.method = "max"),
+             prop_area = round(rank_sce/nrow(df_sp)*100,2)) %>% 
+      select(prop_area,everything(),-rank_sce,-scenario) %>%
+      group_by(prop_area) %>% 
+      summarize(across(everything(),~sum(.x, na.rm = TRUE)))
+    
+    gc()
+    
+    tmp_prop_area <- tmp_df %>% select(prop_area)
+    tmp_df <- tmp_df %>% select(-prop_area) 
+    max_richness <- sum(colSums(tmp_df,na.rm=T)!=0)
+    richness <- c()
+    for(tmp_r in 1:nrow(tmp_df)){
+      tmp_df_sp <- tmp_df[1:tmp_r,]
+      tmp_colsum <- colSums(tmp_df_sp,na.rm=T)!=0;rm(tmp_df_sp)
+      tmp_richness <- sum(tmp_colsum)
+      richness <- c(richness, tmp_richness)
+      gc()
+      cat(paste0(tmp_n,"/", length(all_names),
+                 "; - ",tmp_r," - ", nrow(tmp_df), 
+                 "; ",tmp_richness, "- ",max_richness,
+                 "; scenario: ", tmp_col,"\r"))
+      if(tmp_richness==max_richness){
+        break
+      }
+    }
+    gc();rm(tmp_df)
+    df_prop_area <- data.frame(prop_area=tmp_prop_area$prop_area[1:length(richness)],
+                           richness=richness) %>% 
+      merge(.,tmp_prop_area,all.y=T) %>% 
+      mutate(richness=ifelse(is.na(richness), max(richness,na.rm = T), richness)) %>% 
+      setNames(c("prop_area", tmp_col))
+    gc();rm(tmp_prop_area)
+    df_out <- 
+      merge(df_out,df_prop_area,by="prop_area",all.x=T) 
+  }
+  saveRDS(df_out, out_rds)
+}
+
+```
+
+# 5 Prepare datasets for evaluating the proportion of covered habitat
+
+```{r}
+
+in_rds <- paste0(out_path, "result_9_evaluation_optimization_method/evaluation_optimization_method.rds")
+in_PUs_sp <- paste0(in_path, "pixels_by_species/pixels_by_species_binary_AOH30m_aggregated.rds")
+
+my_break <- c(0.2)
+out_rds <- paste0(out_path, "result_9_evaluation_optimization_method/performance_in_proportion_covered_habitat.rds")
+out_rds_freq <- paste0(out_path, "result_9_evaluation_optimization_method/performance_in_proportion_covered_habitat_freq_break",my_break,".rds")
+out_all <- c(out_rds, out_rds_freq)
+
+if (sum(!file.exists(out_all))!=0) {
+  
+  gbif_name <- readRDS(in_PUs_sp) %>% colnames(.);gc()
+  df_sp <- readRDS(in_rds);gc()
+  df_info <- df_sp %>% 
+    select(-all_of(gbif_name))
+  df_sp <- df_sp %>% select(all_of(gbif_name));gc()
+  
+  df_out <- data.frame(gbif_name = gbif_name,
+                       SC_pixel = colSums(df_sp, na.rm = T))
+  rownames(df_out) <- NULL
+  
+  tmp_my_sel <- c(sum(df_info$with_PAs_our_method==0,na.rm = T),
+               ceiling(nrow(df_sp)*0.3),
+               ceiling(nrow(df_sp)*0.5))
+  my_scenario <- c("Current","Top30", "Top50")
+  
+  all_names <- colnames(df_info)
+  for (tmp_n in 1:length(all_names)) {
+    tmp_col <- all_names[tmp_n]
+    tmp_df <- df_info %>%
+      select(all_of(tmp_col)) %>% 
+      setNames("scenario") %>% 
+      cbind(.,df_sp) %>% 
+      filter(!scenario==-1&!is.na(scenario)) %>% 
+      arrange(scenario)
+    
+    my_check <- sum(tmp_col=="with_PAs_our_method")
+    if (my_check!=0) {
+      old_PAs <- sum(df_info$with_PAs_our_method==0,na.rm = T)
+      my_sel <- c(0,
+                  ceiling(nrow(df_sp)*0.3)-old_PAs,
+                  ceiling(nrow(df_sp)*0.5)-old_PAs)
+    } else {
+      my_sel <- tmp_my_sel
+    }
+    for (tmp_s in 1:length(my_sel)) {
+      tmp_sel <- my_sel[tmp_s]
+      tmp_scenario <- my_scenario[tmp_s]
+      tmp_sel_df <- tmp_df %>% 
+        filter(scenario<=tmp_sel) %>% 
+        select(-scenario)
+      tmp_colsums <- colSums(tmp_sel_df, na.rm = T)
+      df_out <- df_out %>% 
+        mutate(!!paste0(tmp_col,"_",tmp_scenario):=tmp_colsums);gc()
+      cat(paste0(tmp_n,"/", length(all_names),
+                 "; - ",tmp_s," - ", length(my_sel),
+                 "; PAs scenario: ", "- ",tmp_scenario,
+                 "; scenario: ", tmp_col,"\r"))
+    }
+  }
+
+  df_out_info <- df_out %>% 
+    select(gbif_name,SC_pixel)
+  df_out_prop <- df_out %>% 
+    select(-gbif_name,-SC_pixel)/df_out_info$SC_pixel
+  df_out_prop <- cbind(df_out_info,df_out_prop)
+  
+  
+  tmp_df_sp <- df_out_prop %>% 
+    select(-gbif_name,-SC_pixel)
+  tmp_plot_df <- data.frame(prop = NA, group = NA, count = NA)
+
+  for (j in colnames(tmp_df_sp)) {
+    tmp_count <- NULL
+    for (tmp_b in seq(0, 1, my_break)) {
+      tmp_b_count <- sum(tmp_df_sp[,j] >=tmp_b)
+      tmp_count <- c(tmp_count, tmp_b_count)
+    }
+    tmp_plot_df_j <- data.frame(
+      prop = seq(0, 1, my_break),
+      group = rep(j, length(seq(0, 1, my_break))),
+      count = tmp_count)
+    tmp_plot_df <- rbind(tmp_plot_df, tmp_plot_df_j)
+  }
+      
+  tmp_plot_df <- tmp_plot_df[-1,] %>% 
+    setNames(c("Prop","group", "count")) %>%          
+    `rownames<-`(1:nrow(.)) 
+  if (!file.exists(out_rds)) {
+    saveRDS(df_out_prop, out_rds)
+  }
+  if (!file.exists(out_rds_freq)) {
+    saveRDS(tmp_plot_df, out_rds_freq)
+  }
+}
+
+```

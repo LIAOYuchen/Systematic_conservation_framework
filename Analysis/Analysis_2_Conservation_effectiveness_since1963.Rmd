@@ -1,0 +1,633 @@
+---
+title: "Analysis 2: Conservation effectiveness since 1963"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory 
+setwd(my_wd <- 'path/to/your/data/dir/') 
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(dplyr)
+library(reshape2)
+```
+
+# 1 Changes in the number and area of protected areas since 1963
+
+```{r}
+
+out_csv <- paste0(out_path, "result_2_conservation_effectiveness_since1963/Plot_number_and_area_PAs.csv")
+if(!file.exists(out_csv)) {
+  
+  path_prop <- paste0(out_path,"result_1_conservation_gaps/prop_covered_habitat_by_species.csv")
+  path_sp <- read.csv(path_prop)$gbif_name
+  
+  path_PAs <- paste0(in_path, "PAs_coverage/PAs_by_species_based_AOH30m_aggregated.rds")
+  df_PAs <- readRDS(path_PAs) %>% 
+    select(-all_of(path_sp)) %>% 
+    group_by(PAs_ID) %>%
+    summarize(across(c(No_pixel, No_pixel_PAs), sum),
+              across(-c(No_pixel, No_pixel_PAs), ~ first(.[!is.na(.)]))) %>% 
+    select(-c(PAs_value, No_pixel, NR_ID, NP_ID)) %>% 
+    mutate(count = 1) %>% 
+    setNames(gsub("_PAs", "", colnames(.)))
+  
+  df_panda_PAs <- df_PAs %>% 
+    filter(type==1) %>% 
+    group_by(Year) %>%
+    summarize(across(c(No_pixel, count), sum),
+              across(-c(No_pixel, count), ~ first(.[!is.na(.)]))) %>% 
+    select(Year, No_pixel, count) %>% 
+    setNames(c("Year", "Pixel_Panda", "Number_Panda")) %>% 
+    mutate(Total_Pixel_Panda = cumsum(Pixel_Panda),
+           Total_Number_Panda = cumsum(Number_Panda),
+           Total_Area_Panda = Total_Pixel_Panda*(30/1000)^2)
+  
+  df_plant_PAs <- df_PAs %>% 
+    filter(type==-1) %>% 
+    group_by(Year) %>%
+    summarize(across(c(No_pixel, count), sum),
+              across(-c(No_pixel, count), ~ first(.[!is.na(.)]))) %>% 
+    select(Year, No_pixel, count) %>% 
+    setNames(c("Year", "Pixel_Plant", "Number_Plant")) %>% 
+    mutate(Total_Pixel_Plant = cumsum(Pixel_Plant),
+           Total_Number_Plant = cumsum(Number_Plant),
+           Total_Area_Plant = Total_Pixel_Plant*(30/1000)^2)
+  
+  df_other_PAs <- df_PAs %>% 
+    filter(is.na(type)) %>%
+    mutate(type=0) %>% 
+    group_by(Year) %>%
+    summarize(across(c(No_pixel, count), sum),
+              across(-c(No_pixel, count), ~ first(.[!is.na(.)]))) %>% 
+    select(Year, No_pixel, count) %>% 
+    setNames(c("Year", "Pixel_Other", "Number_Other")) %>% 
+    mutate(Total_Pixel_Other = cumsum(Pixel_Other),
+           Total_Number_Other = cumsum(Number_Other),
+           Total_Area_Other = Total_Pixel_Other*(30/1000)^2)
+  
+  df_panda_plant <- merge(df_panda_PAs, df_plant_PAs, by= "Year", all=T)
+  df_panda_plant_other <- merge(df_panda_plant, df_other_PAs,by="Year", all=T)
+  
+  df_all_PAs <- df_PAs %>% 
+    group_by(Year) %>%
+    summarize(across(c(No_pixel, count), sum),
+              across(-c(No_pixel, count), ~ first(.[!is.na(.)]))) %>% 
+    select(Year, No_pixel, count) %>% 
+    setNames(c("Year", "Pixel_All", "Number_All")) %>% 
+    mutate(Total_Pixel_All = cumsum(Pixel_All),
+           Total_Number_All = cumsum(Number_All),
+           Total_Area_All = Total_Pixel_All*(30/1000)^2)
+  
+  df_PAs_merged <- merge(df_all_PAs, df_panda_plant_other, by="Year", all=T) %>% 
+    select(Year, matches("Total_Number"), matches("Total_Area")) %>% 
+    select(Year, matches("_All"), matches("_Panda"), matches("_Plant"), matches("_Other"))
+  
+  tmp_types <- c("Panda","Plant","Other")
+  for (tmp_type in tmp_types) {
+    rows <- which(is.na(df_PAs_merged[,paste0("Total_Number_",tmp_type)]))
+    cols <- grepl(tmp_type, colnames(df_PAs_merged))
+    if(length(rows)!=0){
+      for (row in rows) {
+        if (row==1) {
+          df_PAs_merged[1,cols] <- 0
+        } else {
+          df_PAs_merged[row,cols] <- df_PAs_merged[row-1,cols]
+        }
+      }
+    }
+  }
+  write.csv(df_PAs_merged, out_csv)
+}
+
+```
+
+
+# 2 Conservation effectiveness in number of covered species since 1963
+
+## 2.1 Add columns to group PAs by their establishment year into specific time intervals
+
+```{r}
+
+start_years <- 1963
+end_years <- 2023
+interval_years <- c(1,30)
+suffix_name <- gsub("1years","1year",paste0("every_",interval_years,"years"))
+
+out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/PAs_by_species_grouped.rds")
+if (!file.exists(out_rds)) {
+  
+  path_PAs <- paste0(in_path, "PAs_coverage/PAs_by_species_based_AOH30m_aggregated.rds")
+  df_PAs <- readRDS(path_PAs)
+  for (i in length(interval_years):1) {
+    if (interval_years[i]!=1) {
+      time_nodes <- seq(start_years, end_years, by = interval_years[i])
+      df_PAs <- df_PAs %>%
+        mutate(!!suffix_name[i] := as.numeric(as.character(cut(Year, breaks = c(floor(start_years/10)*10,time_nodes), labels = time_nodes)))) %>%
+        select(!!suffix_name[i], everything())
+    }
+    if (interval_years[i]==1) {
+      time_nodes <- c(unique(df_PAs$Year[(order(df_PAs$Year))]), end_years)
+      df_PAs <- df_PAs %>%
+        mutate(!!suffix_name[i] := 
+                 as.numeric(as.character(cut(Year, breaks = c(time_nodes, ceiling(end_years/10)*10), labels = time_nodes,right = FALSE)))) %>%
+        select(!!suffix_name[i], everything()) %>%
+        select(Year, everything())
+    }
+  }
+  saveRDS(df_PAs, out_rds)
+}
+
+```
+
+## 2.2 Group the PAs according to their conservation targets
+
+```{r}
+
+interval_years <- c(1,30)
+suffix_name <- gsub("1years","1year",paste0("every_",interval_years,"years"))
+
+for (i in 1:length(interval_years)) {
+  out_rds_all <- paste0(out_path,"result_2_conservation_effectiveness_since1963/PAs_by_species_grouped_All_PAs_",suffix_name[i],".rds")
+  out_rds_panda <- gsub("_All","_Panda",out_rds_all)
+  out_rds_plant <- gsub("_All","_Plant",out_rds_all)
+  out_rds_other <- gsub("_All","_Other",out_rds_all)
+  out_rds <- c(out_rds_all, out_rds_panda, out_rds_plant, out_rds_other)
+  if (sum(!file.exists(out_rds))!=0) {
+    if (!file.exists(out_rds_all)) {
+      path_PAs <- paste0(out_path,"result_2_conservation_effectiveness_since1963/PAs_by_species_grouped.rds")
+      df_PAs <- readRDS(path_PAs)
+      df_all <- aggregate(df_PAs, by=list(df_PAs[,suffix_name[i]]), FUN=sum, na.rm=T) %>% 
+        mutate(Year = Group.1) %>% 
+        select(-matches("_ID|PAs_|every_|Group.1|^type$", ignore.case = F))
+      saveRDS(df_all, out_rds_all)
+    }
+    if(!file.exists(out_rds_panda)){
+      df_panda <- df_PAs %>% 
+        filter(type == 1)
+      df_panda <- aggregate(df_panda, by=list(df_panda[,suffix_name[i]]), FUN=sum, na.rm=T)  %>% 
+        mutate(Year = Group.1) %>% 
+        select(-matches("_ID|PAs_|every_|Group.1|^type$", ignore.case = F))
+      saveRDS(df_panda, out_rds_panda)
+    }
+    if(!file.exists(out_rds_plant)){
+      df_plant <- df_PAs %>% 
+        filter(type == -1)
+      df_plant <- aggregate(df_plant, by=list(df_plant[,suffix_name[i]]), FUN=sum, na.rm=T)  %>% 
+        mutate(Year = Group.1) %>% 
+        select(-matches("_ID|PAs_|every_|Group.1|^type$", ignore.case = F))
+      saveRDS(df_plant, out_rds_plant)
+    }            
+    if(!file.exists(out_rds_other)){
+      df_other <- df_PAs %>% 
+        filter(is.na(type))
+      df_other <- aggregate(df_other, by=list(df_other[,suffix_name[i]]), FUN=sum, na.rm=T)  %>% 
+        mutate(Year = Group.1) %>% 
+        select(-matches("_ID|PAs_|every_|Group.1|^type$", ignore.case = F))
+      saveRDS(df_other, out_rds_other)
+    }  
+  } 
+}
+
+        
+```
+
+## 2.3 Effectiveness of PAs in species coverage by conservation target within specific time intervals
+
+```{r}
+
+suffix_name <- "every_1year"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+for (tmp_PAtype in PA_types) {
+  out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure1_",tmp_PAtype,"_",suffix_name,".rds")
+  if (sum(!file.exists(out_rds))!=0) {
+    path_PAs <- paste0(out_path,"result_2_conservation_effectiveness_since1963/PAs_by_species_grouped_",tmp_PAtype,"_",suffix_name,".rds")
+    tmp_rds <- readRDS(path_PAs)
+    tmp_rds_binary <- tmp_rds %>% 
+      vegan::decostand(method = "pa") %>% 
+      mutate(Year = tmp_rds$Year,
+             No_pixel= tmp_rds$No_pixel_PAs)
+    
+    tmp_summary <- data.frame(matrix(NA, nrow=nrow(tmp_rds_binary), ncol=6))
+    colnames(tmp_summary) <- c("Year", "measure1", "increase_measure1",
+                               "accumulate_measure1","area_km2", "accumulate_area")     
+  
+    tmp_summary <- data.frame(matrix(NA, nrow = nrow(tmp_rds_binary), ncol = 6)) %>%
+      setNames(c("Year", "measure1", "increase_measure1", "accumulate_measure1", 
+                 "area_km2", "accumulate_area")) %>%
+      mutate(Year = tmp_rds_binary$Year,
+             area_km2 = (tmp_rds_binary$No_pixel) * (30/1000)^2,
+             accumulate_area = cumsum(area_km2))
+    tmp_rds_binary <- tmp_rds_binary %>% 
+      select(-matches("Year|No_pixel", ignore.case = F))
+    
+    for (s in 1:nrow(tmp_summary)) {
+      tmp_summary$measure1[s] <- sum(colSums(tmp_rds_binary[s,]))
+      tmp_summary$accumulate_measure1[s] <- sum(colSums(tmp_rds_binary[1:s,])!=0)
+      if (s==1) {tmp_summary$increase_measure1[s] <- sum(colSums(tmp_rds_binary[1:s,])!=0)-0} 
+      if (s!=1) {tmp_summary$increase_measure1[s] <-
+        sum(colSums(tmp_rds_binary[1:s,])!=0)-sum(colSums(tmp_rds_binary[1:(s-1),])!=0)}
+    }
+    colnames(tmp_summary) <- paste0(colnames(tmp_summary),"_", tmp_PAtype)
+    saveRDS(tmp_summary, out_rds)
+  }
+}
+
+```
+
+## 2.4 Merge different types of PAs for measure 1 into one table within specific intervals
+
+```{r}
+
+suffix_name <- "every_1year"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure1_",length(PA_types),"Types_PAs_",suffix_name,"_merged.rds")
+
+if (sum(!file.exists(out_rds))!=0) {
+  tmp_ff_rds <- list.files(paste0(out_path,"result_2_conservation_effectiveness_since1963/"),             paste0("Measure1.*",suffix_name,".rds$"),full.names = T)
+
+  df_merged <- readRDS(tmp_ff_rds[1]) %>% 
+    select(matches("Year")) %>% 
+    setNames("Year") %>% 
+    data.frame()
+    
+  for (tmp_PAtype in PA_types) {
+    tmp_ff <- tmp_ff_rds[grepl(tmp_PAtype,tmp_ff_rds)]
+    tmp_rds <- readRDS(tmp_ff) %>%
+      select(matches(c("Year","accumulate"))) %>%
+      rename(Year = matches("Year")) %>% 
+      rename_all(~ gsub("_PAs|accumulate_", "", .))  %>% 
+      data.frame()
+    df_merged <- merge(df_merged, tmp_rds, by="Year", all=T) %>% data.frame
+  }
+  saveRDS(df_merged, out_rds)
+}
+  
+```
+
+## 2.5 Prepare the datasets for plotting the effectiveness of measure 1
+
+```{r}
+
+suffix_name <- "every_1year"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+out_csv <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Plot_Measure1_",length(PA_types),"Types_PAs_",suffix_name,".csv")
+out_csv_melt <- gsub("\\.csv","\\_melt.csv",out_csv)
+out_all <- c(out_csv, out_csv_melt)
+
+if(sum(!file.exists(out_all)!=0)) {
+  
+  path_PAs <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure1_",length(PA_types),"Types_PAs_",suffix_name,"_merged.rds")
+  df_all <- cbind(
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","All"))) %>% 
+      select(matches(c("Year","measure1"))) %>%
+      rename_all(~ gsub("measure1_All_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups", value.name = "all_measure1"),
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","All"))) %>%
+      select(matches(c("Year","area"))) %>%
+      rename_all(~ gsub("area_All_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups_area", value.name = "all_area")) %>% 
+    data.frame()
+  if(table(as.character(df_all$Year)==as.character(df_all$Year.1))==nrow(df_all)){df_all$Year.1 <- NULL}
+  if(table(as.character(df_all$groups)==as.character(df_all$groups_area))==nrow(df_all)){df_all$groups_area <- NULL}
+  
+  df_panda <- cbind(
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Panda"))) %>% 
+      select(matches(c("Year","measure1"))) %>%
+      rename_all(~ gsub("richness_Panda_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups", value.name = "panda_measure1"),
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Panda"))) %>% 
+      select(matches(c("Year","area"))) %>%
+      rename_all(~ gsub("area_Panda_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups_area", value.name = "panda_area")) %>% 
+    data.frame()
+
+  if(table(as.character(df_panda$Year)==as.character(df_panda$Year.1))==nrow(df_panda)){df_panda$Year.1 <- NULL}
+  if(table(as.character(df_panda$groups)==as.character(df_panda$groups_area))==nrow(df_panda)){df_panda$groups_area <- NULL}
+
+  df_plant <- cbind(
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Plant"))) %>% 
+      select(matches(c("Year","measure1"))) %>%
+      rename_all(~ gsub("measure1_Plant_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups", value.name = "plant_measure1"),
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Plant"))) %>% 
+      select(matches(c("Year","area"))) %>%
+      rename_all(~ gsub("area_Plant_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups_area", value.name = "plant_area")) %>% 
+    data.frame()
+
+  if(table(as.character(df_plant$Year)==as.character(df_plant$Year.1))==nrow(df_plant)){df_plant$Year.1 <- NULL}
+  if(table(as.character(df_plant$groups)==as.character(df_plant$groups_area))==nrow(df_plant)){df_plant$groups_area <- NULL}            
+
+  df_other <- cbind(
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Other"))) %>% 
+      select(matches(c("Year","measure1"))) %>%
+      rename_all(~ gsub("measure1_Other_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups", value.name = "other_measure1"),
+    readRDS(path_PAs) %>% 
+      select(matches(c("Year","Other"))) %>% 
+      select(matches(c("Year","area"))) %>%
+      rename_all(~ gsub("area_Other_", "", .)) %>%
+      melt(id.vars = "Year", variable.name = "groups_area", value.name = "other_area")) %>% 
+    data.frame()
+
+  if(table(as.character(df_other$Year)==as.character(df_other$Year.1))==nrow(df_other)){df_other$Year.1 <- NULL}
+  if(table(as.character(df_other$groups)==as.character(df_other$groups_area))==nrow(df_other)){df_other$groups_area <- NULL}
+  
+  df_combine <- cbind(df_all, df_panda, df_plant, df_other) %>% data.frame()
+  
+  if(table(as.character(df_combine$Year)==as.character(df_combine$Year.1))==nrow(df_combine)){df_combine$Year.1 <- NULL}
+  if(table(as.character(df_combine$groups)==as.character(df_combine$groups.1))==nrow(df_combine)){df_combine$groups.1 <- NULL}
+  if(table(as.character(df_combine$Year)==as.character(df_combine$Year.2))==nrow(df_combine)){df_combine$Year.2 <- NULL}
+  if(table(as.character(df_combine$groups)==as.character(df_combine$groups.2))==nrow(df_combine)){df_combine$groups.2 <- NULL}            
+  if(table(as.character(df_combine$Year)==as.character(df_combine$Year.3))==nrow(df_combine)){df_combine$Year.3 <- NULL}
+  if(table(as.character(df_combine$groups)==as.character(df_combine$groups.3))==nrow(df_combine)){df_combine$groups.3 <- NULL}
+
+  
+  tmp_types <- c("panda","plant","other")
+  for (tmp_type in tmp_types) {
+    rows <- which(is.na(df_combine[,paste0(tmp_type,"_measure1")]))
+    cols <- grepl(tmp_type, colnames(df_combine))
+    if(length(rows)!=0){
+      for (row in rows) {
+        if(row==1){
+          df_combine[row,cols] <- 0
+        }else{
+          df_combine[row,cols] <- df_combine[row-1,cols]
+        }
+      }
+    }
+  }
+
+  
+  if(!file.exists(out_csv)) {
+    write.csv(df_combine, out_csv)
+  }
+  if(!file.exists(out_csv_melt)) {
+    df_combine_measure1 <- df_combine %>% 
+      select(matches(c("Year","groups","measure1"))) %>%
+      mutate(Year_groups = paste0(Year, "_", groups)) %>% 
+      select(matches("_")) %>% 
+      melt(id.vars = "Year_groups", variable.name = "type", value.name = "measure1") %>% 
+      mutate(Year = as.numeric(unlist(lapply(strsplit(Year_groups, "_"), "[[", 1))),
+             Year_groups = NULL,
+             type = gsub("_measure1", "", type),
+             group_datasets = paste0(type, "_PAs")) %>% 
+      select(c("Year", "group_datasets", "measure1"))
+    
+    write.csv(df_combine_measure1, out_csv_melt)
+  }
+}
+
+```
+
+
+# 3 Conservation effectiveness in proportion of covered habitat since 1963
+
+## 3.1 Calculate the proportion of covered habitats per species
+
+```{r Prop_PAs}
+
+suffix_name <- "every_30years"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+for (tmp_PAtype in PA_types) {
+  out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure2_",tmp_PAtype,"_",suffix_name,".rds")
+  if(!file.exists(out_rds)){
+    
+    path_SA <- paste0(in_path,"pixels_by_species/pixels_by_species_AOH30m_aggregated.rds")
+    path_PA <- paste0(out_path,"result_2_conservation_effectiveness_since1963/PAs_by_species_grouped_",tmp_PAtype,"_",suffix_name,".rds")
+    
+    tmp_PAs <- readRDS(path_PA) %>% select(-No_pixel_PAs)
+    tmp_SA <- readRDS(path_SA) %>% colSums(.);gc()
+    
+    tmp_PAs_SA <- tmp_PAs %>% 
+      select(-c("Year", "No_pixel"))
+    for (z in 2:nrow(tmp_PAs)) {
+      tmp_PAs_sel <- tmp_PAs[1:z,] %>% select(-c("Year", "No_pixel"))
+      tmp_PAs_SA[z,] <- colSums(tmp_PAs_sel)
+    }
+    tmp_PAs_SA <- tmp_PAs_SA %>%
+      t() %>%
+      data.frame() %>%
+      setNames(paste0("Year_", tmp_PAs$Year)) %>%
+      mutate(sum_pixels= rowSums(.)) / tmp_SA
+    
+    saveRDS(tmp_PAs_SA, out_rds)
+  }
+}
+
+
+```
+
+## 3.2 Frequency of habitat coverage proportions
+
+```{r}
+
+my_break <- 0.2
+suffix_name <- "every_30years"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+for (tmp_PAtype in PA_types) {
+  out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure2_",tmp_PAtype,"_",suffix_name,"_break",my_break,".rds")
+  if (!file.exists(out_rds)) {
+    input_path <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure2_",tmp_PAtype,"_",suffix_name,".rds")
+    tmp_PAs <- readRDS(input_path) %>%
+      select(matches("Year"))
+    tmp_plot_df <- data.frame(
+      prop = NA,
+      year = NA, 
+      count = NA
+    )
+    for (j in colnames(tmp_PAs)) {
+      tmp_count <- NULL
+      for (tmp_b in seq(0, 1, my_break)) {
+        tmp_b_count <- sum(tmp_PAs[,j] >=tmp_b)
+        tmp_count <- c(tmp_count, tmp_b_count)
+      }
+      tmp_plot_df_j <- data.frame(
+        prop = seq(0, 1, my_break),
+        year = rep(j, length(seq(0, 1, my_break))),
+        count = tmp_count
+      )
+      tmp_plot_df <- rbind(tmp_plot_df, tmp_plot_df_j)
+    }
+    tmp_plot_df <- tmp_plot_df[-1,] %>% 
+      setNames(c("Prop","Year", paste0(gsub("PAs","",tmp_PAtype),"count_",y))) %>%
+      mutate(Year = gsub("Year_", "", Year),
+             groups = paste0(Year,"_", Prop)) %>% 
+      `rownames<-`(1:nrow(.))
+    saveRDS(tmp_plot_df, out_rds)
+  }
+}
+
+```
+
+## 3.3 Merge different types of PAs for measure 2 into table within specific intervals
+
+```{r merge_prop}
+
+my_break <- 0.2
+suffix_name <- "every_30years"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+ 
+out_rds <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure2_",length(PA_types),"Types_PAs_",suffix_name,"_merged.rds")
+
+if (!file.exists(out_rds)) {
+  tmp_ff<- list.files(paste0(out_path, "result_2_conservation_effectiveness_since1963/"),
+                      paste0("Measure2.*", suffix_name,"_break",my_break,".rds"), full.names = T)
+  df <- readRDS(tmp_ff[1]) %>% 
+    select(matches("groups"))
+  for (tmp_PAtype in PA_types) {
+    ff <- tmp_ff[grepl(tmp_PAtype,tmp_ff)]
+    tmp_rds <- readRDS(ff) %>% 
+      select(matches(c("groups","count"))) %>%
+      rename_all(~ gsub("_count", "", .))  %>% 
+      data.frame()
+    
+    df <- merge(df, tmp_rds, by="groups", all=T)
+    
+    if (tmp_PAtype == "Panda_PAs") {
+      rows_0 <- which(grepl("_0$",df$groups))
+      rows_1 <- which(grepl("_1$",df$groups))
+      col_panda <- colnames(df)[grepl("Panda",colnames(df))]
+      na_rows_0 <- rows_0[which(sum(df[rows_0,col_panda], na.rm = T)==0)]
+      na_rows_1 <- rows_1[which(sum(df[rows_0,col_panda], na.rm = T)==0)]
+      if (sum(na_rows_1-na_rows_0 ==rep(6-1, length(na_rows_0)))==length(na_rows_1)) {
+        if (length(na_rows_0)!=0) {
+          for (i in 1:length(na_rows_0)) {
+            na_row_0_sel <- na_rows_0[i]
+            na_row_1_sel <- na_rows_1[i]
+            df[na_row_0_sel:na_row_1_sel,col_panda] <- df[(na_row_0_sel-6):(na_row_1_sel-6),col_panda]
+          }
+        }
+      }
+    }
+    if (tmp_PAtype == "Plant_PAs") {
+      rows_0 <- which(grepl("_0$",df$groups))
+      rows_1 <- which(grepl("_1$",df$groups))
+      col_plant <- colnames(df)[grepl("Plant",colnames(df))]
+      na_rows_0 <- rows_0[which(sum(df[rows_0,col_plant], na.rm = T)==0)]
+      na_rows_1 <- rows_1[which(sum(df[rows_0,col_plant], na.rm = T)==0)]
+      if (sum(na_rows_1-na_rows_0 ==rep(6-1, length(na_rows_0)))==length(na_rows_1)) {
+        if (length(na_rows_0)!=0) {
+          for (i in 1:length(na_rows_0)) {
+            na_row_0_sel <- na_rows_0[i]
+            na_row_1_sel <- na_rows_1[i]
+            df[na_row_0_sel:na_row_1_sel,col_plant] <- df[(na_row_0_sel-6):(na_row_1_sel-6),col_plant]
+          }
+        }
+      }
+    }
+    if (tmp_PAtype == "Other_PAs") {
+      rows_0 <- which(grepl("_0$",df$groups))
+      rows_1 <- which(grepl("_1$",df$groups))
+      col_other <- colnames(df)[grepl("Other",colnames(df))]
+      na_rows_0 <- rows_0[which(sum(df[rows_0,col_other], na.rm = T)==0)]
+      na_rows_1 <- rows_1[which(sum(df[rows_0,col_other], na.rm = T)==0)]
+      if (sum(na_rows_1-na_rows_0 ==rep(6-1, length(na_rows_0)))==length(na_rows_1)) {
+        if (length(na_rows_0)!=0) {
+          for (i in 1:length(na_rows_0)) {
+            na_row_0_sel <- na_rows_0[i]
+            na_row_1_sel <- na_rows_1[i]
+            df[na_row_0_sel:na_row_1_sel,col_other] <- df[(na_row_0_sel-6):(na_row_1_sel-6),col_other]
+          }
+        }
+      }
+    }
+    saveRDS(df, out_rds)
+  }
+}
+```
+
+## 3.4 Prepare the datasets for plotting the effectiveness of measure 2
+
+```{r Prop_for_plot}
+
+my_break <- 0.2
+suffix_name <- "every_30years"
+PA_types <- c("All_PAs", "Panda_PAs", "Plant_PAs", "Other_PAs")
+
+out_csv <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Plot_Measure2_",length(PA_types),"Types_PAs_",suffix_name,"_break",my_break,".csv")
+out_csv_melt <- gsub("\\.csv","\\_melt.csv",out_csv)
+out_all <- c(out_csv, out_csv_melt)
+
+if (sum(!file.exists(out_all)!=0)) {
+  
+  ff <- paste0(out_path,"result_2_conservation_effectiveness_since1963/Measure2_",length(PA_types),"Types_PAs_",suffix_name,"_merged.rds")
+  
+  tmp_df <- readRDS(ff)
+
+  df_all <- tmp_df %>% 
+    select(matches(c("groups","All"))) %>% 
+    melt(id.vars = "groups", variable.name = "datasets", value.name = "All_count") %>% 
+    mutate(prop = as.numeric(unlist(lapply(strsplit(groups, "_"), "[[", 2))),
+           datasets = as.numeric(unlist(lapply(strsplit(as.character(datasets), "_"), "[[", 2))),
+           year = paste0(unlist(lapply(strsplit(groups, "_"), "[[", 1)), "_",datasets)) %>% 
+    select(matches(c("prop", "year","count")))
+  
+  df_panda <- tmp_df %>% 
+    select(matches(c("groups","Panda"))) %>% 
+    melt(id.vars = "groups", variable.name = "datasets", value.name = "Panda_count") %>% 
+    mutate(prop = as.numeric(unlist(lapply(strsplit(groups, "_"), "[[", 2))),
+           datasets = as.numeric(unlist(lapply(strsplit(as.character(datasets), "_"), "[[", 2))),
+           year = paste0(unlist(lapply(strsplit(groups, "_"), "[[", 1)), "_",datasets)) %>% 
+    select(matches(c("prop", "year","count")))
+  
+  df_plant <- tmp_df %>% 
+    select(matches(c("groups","Plant"))) %>% 
+    melt(id.vars = "groups", variable.name = "datasets", value.name = "Plant_count") %>% 
+    mutate(prop = as.numeric(unlist(lapply(strsplit(groups, "_"), "[[", 2))),
+           datasets = as.numeric(unlist(lapply(strsplit(as.character(datasets), "_"), "[[", 2))),
+           year = paste0(unlist(lapply(strsplit(groups, "_"), "[[", 1)), "_",datasets)) %>% 
+    select(matches(c("prop", "year","count")))
+  
+  df_other <- tmp_df %>% 
+    select(matches(c("groups","Other"))) %>% 
+    melt(id.vars = "groups", variable.name = "datasets", value.name = "Other_count") %>% 
+    mutate(prop = as.numeric(unlist(lapply(strsplit(groups, "_"), "[[", 2))),
+           datasets = as.numeric(unlist(lapply(strsplit(as.character(datasets), "_"), "[[", 2))),
+           year = paste0(unlist(lapply(strsplit(groups, "_"), "[[", 1)), "_",datasets)) %>% 
+    select(matches(c("prop", "year","count")))
+  
+  df_combine <- cbind(df_all, df_panda, df_plant, df_other) %>% 
+    data.frame()
+  
+  
+  if(table(as.character(df_combine$prop)==as.character(df_combine$prop.1))==nrow(df_combine)){df_combine$prop.1 <- NULL}
+  if(table(as.character(df_combine$year)==as.character(df_combine$year.1))==nrow(df_combine)){df_combine$year.1 <- NULL}
+  if(table(as.character(df_combine$prop)==as.character(df_combine$prop.2))==nrow(df_combine)){df_combine$prop.2 <- NULL}
+  if(table(as.character(df_combine$year)==as.character(df_combine$year.2))==nrow(df_combine)){df_combine$year.2 <- NULL}
+  if(table(as.character(df_combine$prop)==as.character(df_combine$prop.3))==nrow(df_combine)){df_combine$prop.3 <- NULL}
+  if(table(as.character(df_combine$year)==as.character(df_combine$year.3))==nrow(df_combine)){df_combine$year.3 <- NULL}
+  
+  df_combine_melt <- df_combine %>% 
+    mutate(groups= paste0(prop,"p_", year)) %>% 
+    select(-c("prop", "year")) %>% 
+    melt(id.vars = "groups", variable.name = "PAs", value.name = "count") %>% 
+    mutate(PAs = gsub("_count","",PAs),
+           prop = unlist(lapply(strsplit(groups, "p_"), "[[", 1)),
+           year = paste0(PAs,"_",unlist(lapply(strsplit(groups, "p_"), "[[", 2)))) %>% 
+    select(matches(c("prop", "year","count")))
+  
+  if(!file.exists(out_csv)) {
+    write.csv(df_combine, out_csv)
+  }
+  if(!file.exists(out_csv_melt)) {
+    write.csv(df_combine_melt, out_csv_melt)
+  }
+}
+
+```
