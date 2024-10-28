@@ -1,0 +1,362 @@
+---
+title: "Analysis 3: Conservation effectiveness at present"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# set you working directory
+setwd(my_wd <- 'path/to/your/data/dir/')
+in_path <- paste0(my_wd,"input/")
+out_path <- paste0(my_wd,"output/")
+
+library(dplyr)
+library(reshape2)
+
+```
+
+# 1 Merge the information of PAs with the PA-by-species matrix
+
+```{r}
+
+out_rds <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/PAs_info_by_species_based_AOH30m_aggregated.rds")
+
+if (!file.exists(out_rds)) {
+  
+  PAs_info <- read.csv(paste0(in_path, "PAs_coverage/PAs_info_categories_all.csv"), row=1) %>% 
+    mutate(ID_PAs=OBJECTID) %>% 
+    select(-OBJECTID)
+  
+  path_PAs <-  paste0(in_path, "PAs_coverage/PAs_by_species_based_AOH30m_aggregated.rds")
+  tmp_rds <- readRDS(path_PAs)
+          
+  tmp_NRs_all <- tmp_rds %>%
+    aggregate(., by=list(ID_PAs=tmp_rds$NR_ID), FUN=sum, na.rm=TRUE) %>% 
+    select(-matches("_ID|_value|^Year$|^type$"))
+  
+  tmp_NP_all <- tmp_rds %>%
+    aggregate(., by=list(ID_PAs=tmp_rds$NP_ID), FUN=sum, na.rm=TRUE) %>% 
+    select(-matches("_ID|_value|^Year$|^type$"))
+  
+  if (table(colnames(tmp_NRs_all) == colnames(tmp_NP_all))==ncol(tmp_NRs_all)) {
+    tmp_PAs_all <- rbind(tmp_NRs_all, tmp_NP_all) 
+  }
+  df_PAs <- merge(PAs_info, tmp_PAs_all, by="ID_PAs")
+  
+  saveRDS(df_PAs, out_rds)
+
+}
+
+```
+
+# 2 Calculate two measures to evaluate the effectiveness of existing PAs
+
+```{r}
+
+out_rds <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/Two_measures_per_PA.rds")
+
+if (!file.exists(out_rds)) {
+  
+  path_list <- paste0(in_path, "species_info/species_list.csv")
+  sp_info <- read.csv(path_list,row = 1) %>% 
+    select(matches("gbif_name$|endemic|prolevel|threatened"))
+  splist <- sp_info$gbif_name %>% as.character()
+  
+  path_PAs_sp <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/PAs_info_by_species_based_AOH30m_aggregated.rds")
+  
+  df_PAs_sp <- readRDS(path_PAs_sp)
+  df_sp <- df_PAs_sp %>% 
+    select(matches(splist))
+  df_sp_binary <- df_sp %>% 
+    vegan::decostand(., method = "pa")
+  df_PAs <- df_PAs_sp %>% 
+    select(-matches(splist)) %>% 
+    mutate(Area_km2 = No_pixel_PAs* (30/1000)^2)
+  
+  # Measure 1:
+  Measure_1 <- data.frame(Measure1_all_Endemic = rowSums(df_sp_binary))
+  col_sptype <- colnames(sp_info)[which(!grepl("gbif_name", colnames(sp_info)))]
+  for (c_type in col_sptype) {
+    tmp_df <- sp_info %>% 
+      select(matches(paste0("gbif_name|", c_type)))
+    tmp_subtype <- names(table(tmp_df[,c_type]))
+    
+    if (sum(grepl("Non", tmp_subtype))!=0) {
+      tmp_subtype <- c(tmp_subtype[grepl("Non", tmp_subtype)],
+                       tmp_subtype[!grepl("Non", tmp_subtype)])
+    }
+    for (i in 1:length(tmp_subtype)) {
+      tmp_st <- tmp_subtype[i]
+      if (grepl("Non", tmp_st)) {
+        tmp_st_sp <- tmp_df$gbif_name[which(tmp_df[,c_type]!=tmp_st)]
+        tmp_st <- gsub("Non-", "all_", tmp_st)
+      } else {
+        tmp_st_sp <- tmp_df$gbif_name[which(tmp_df[,c_type]==tmp_st)]
+        tmp_st <- gsub("2", "NaPro2", gsub("1", "NaPro1", tmp_st))
+      }
+      sel_df_sp_binary <- df_sp_binary[, colnames(df_sp_binary) %in% tmp_st_sp]
+      tmp_measure_name <- paste0("Measure1_", tmp_st)
+      Measure_1 <- Measure_1 %>% 
+        mutate(!!tmp_measure_name := rowSums(sel_df_sp_binary))
+    }
+  }
+
+  # Measure 2:
+  m2 <- t(t(df_sp) / colSums(df_sp,na.rm = T))
+  # check: table(round(colSums(m2),10)==1)
+  Measure2_all_Endemic <- apply(m2, 1, FUN = function(x){mean(x, na.rm =T)})
+  Measure_2 <- data.frame(Measure2_all_Endemic = Measure2_all_Endemic*100)
+  col_sptype <- colnames(sp_info)[which(!grepl("gbif_name", colnames(sp_info)))]
+  for (c_type in col_sptype) {
+    tmp_df <- sp_info %>% 
+      select(matches(paste0("gbif_name|", c_type)))
+    tmp_subtype <- names(table(tmp_df[,c_type]))
+    if (sum(grepl("Non", tmp_subtype))!=0) {
+      tmp_subtype <- c(tmp_subtype[grepl("Non", tmp_subtype )],
+                       tmp_subtype[!grepl("Non", tmp_subtype )])
+    }
+    for (i in 1:length(tmp_subtype)) {
+      tmp_st <- tmp_subtype[i]
+      if (grepl("Non", tmp_st)) {
+        tmp_st_sp <- tmp_df$gbif_name[which(tmp_df[,c_type]!=tmp_st)]
+        tmp_st <- gsub("Non-", "all_", tmp_st)
+      } else {
+        tmp_st_sp <- tmp_df$gbif_name[which(tmp_df[,c_type]==tmp_st)]
+        tmp_st <- gsub("2", "NaPro2", gsub("1", "NaPro1", tmp_st))
+      }
+      
+      seltmp_st_sp <- colnames(df_sp) %in% tmp_st_sp
+      tmp_sp_sel_st <- df_sp[,seltmp_st_sp]
+      tmp_m2 <- t(t(tmp_sp_sel_st) / colSums(tmp_sp_sel_st, na.rm = T))
+      tmp_Measure2 <- apply(tmp_m2, 1, FUN = function(x){mean(x, na.rm =T)})
+      
+      tmp_measure_name <- paste0("Measure2_", tmp_st)
+      Measure_2 <- Measure_2 %>% 
+        mutate(!!tmp_measure_name := tmp_Measure2*100)
+    }
+  }
+  
+  # combine PAs_info, Measure_1, Measure_2
+  Measure_1 <- Measure_1 %>%
+    select(matches("Measure1_all"))
+  Measure_2 <- Measure_2 %>%
+    select(matches("Measure2_all"))
+  df_measures <- cbind(df_PAs, Measure_1,  Measure_2)
+  saveRDS(df_measures, out_rds)
+
+}
+
+```
+
+# 3 Correct the influence of PA size on conservation effectiveness
+
+```{r}
+
+out_RData <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/RData_two_measures_per_PA.RData")
+
+if (!file.exists(out_RData)) {
+  
+  path_list <- paste0(in_path, "PAs_coverage/PAs_info_categories_all.csv")
+  sp_info <- read.csv(path_list ,row = 1) %>% 
+    select(matches("gbif_name$|endemic|prolevel|threatened"))
+  splist <- sp_info$gbif_name %>% as.character()
+  
+  path_PAs <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/Two_measures_per_PA.rds")
+  PAs_info <- readRDS(path_PAs)
+  
+  Measure_1 <- PAs_info %>% 
+    select(-matches("Measure2_"))
+  measure_colnames <- colnames(Measure_1)[which(grepl("Measure1_", colnames(Measure_1)))]
+  v_area <- Measure_1[,"Area_km2"]
+  for (i in 1:length(measure_colnames)) {
+    Correct_colnames <- paste0("Correct_", measure_colnames[i])
+    v_measure <- Measure_1[,measure_colnames[i]]
+    fit <- lm(log(v_measure+1) ~ log(v_area))
+    Measure_1 <- Measure_1 %>% 
+      mutate(!!Correct_colnames := NA)
+    Measure_1[,ncol(Measure_1)] <- as.numeric(residuals(fit))
+  }
+
+  Measure_2 <- PAs_info %>%
+    select(-matches("Measure1_"))
+  measure_colnames <- colnames(Measure_2)[which(grepl("Measure2_", colnames(Measure_2)))]
+  v_area <- Measure_2[,"Area_km2"]
+  for (i in 1:length(measure_colnames)) {
+    Correct_colnames <- paste0("Correct_", measure_colnames[i])
+    v_measure <- Measure_2[,measure_colnames[i]]
+    Measure_2 <- Measure_2 %>% 
+      mutate(!!Correct_colnames := NA)
+    Measure_2[,ncol(Measure_2)] <- as.numeric(v_measure/v_area)
+  }
+  save(Measure_1, Measure_2, file = out_RData)
+}
+
+```
+
+
+# 4 Build a function to test the significance of PAs effectiveness
+
+```{r}
+
+PAs_effectiveness <- function(df, measure_colnames, group_colnames) {
+  for (i in measure_colnames) {
+    for (g in group_colnames) {
+      
+      cat("################################################\n",
+          "### Let's evaluate how effective the PAs are ###\n",
+          "################################################\n")
+      
+      print(paste0("measure_columns: ",i))
+      print(paste0("group_columns: ",g))   
+      
+      measure_values <- df[,i]
+      group_types <- df[,g]
+      
+      if (grepl("subcategory|category", g)) {
+        sel <- !grepl("Relics|Remains|Natural", group_types)
+        group_types <- group_types[sel]
+        measure_values <- measure_values[sel]
+      }
+      
+      group_types <- group_types %>% as.factor()
+      
+      print(paste0("sample_size: ",length(measure_values)))
+      # Normality test, Null hypothes is that a sample comes from a normally distributed population
+      # if p < 0.05, reject Null hypothesis, 
+      # H1: sample has not been generated from a normal distribution
+      res_normality_test <- tapply(measure_values, group_types, shapiro.test)
+      p_values <- sapply(res_normality_test, function(x) x$p.value)
+      if (sum(p_values > 0.05)==length(p_values)) {
+        res_normality_pvalue = TRUE
+      } else {
+        res_normality_pvalue = FALSE
+      }
+      
+      # Homogenetity test, Null hypothesis that variance are equal across groups
+      # if p < 0.05, reject Null hypothesis, 
+      # H1: there is a difference among group variances
+      
+      res_levene_test <- DescTools::LeveneTest(measure_values, group_types, center = "mean")
+      res_levene_pvalue <- res_levene_test$`Pr(>F)`[1]
+
+      print(paste0("res_normality_test$p.value: ", p_values))
+      print(paste0("res_levene_pvalue$p.value: ", round(res_levene_pvalue,4)))
+
+      if (res_normality_pvalue == TRUE & res_levene_pvalue > 0.05) {
+        print("parameter test")
+        if (length(unique(group_types)) ==2) {
+          print("groups number equal to 2 - t.test ")
+          print((result_t_test <- t.test(measure_values ~ group_types)))
+          print(result_t_test[["p.value"]])
+          cat("Done - t.test :", i, "~", g, "\n ")
+        } else if (length(unique(group_types))>2) {
+          print("groups number greater than to 2 - ANOVA")
+          result_anova <- aov(measure_values ~ group_types)
+          print(summary_anova <-  summary(result_anova))
+          print(p.anova <- unlist(summary_anova )[["Pr(>F)1"]])
+          # ANOVA test, Null hypothesis that no difference among group means
+          # if p < 0.05, reject Null hypothesis, 
+          # H1: there is a difference among group means
+          if (p.anova <0.05) {
+            print("groups number greater than to 2 - ANOVA & TukeyHSD ")
+            print(result_tukey <- TukeyHSD(result_anova))
+            cat("Done - ANOVA & TukeyHSD :", i, "~", g, "\n ")
+          } else {
+            cat("Done - ANOVA:", i, "~", g, "\n ")
+          }
+         }
+      } else if (!(res_normality_pvalue > 0.05 & res_levene_pvalue > 0.05)) {
+        print("Nonparametric tests")
+        if (length(unique(group_types)) ==2) {
+          print("groups number equal to 2 - wilcox.test")
+          group1 <- measure_values[which(group_types==unique(group_types)[1])]
+          group2 <- measure_values[which(group_types==unique(group_types)[2])]
+          print(result_wilcox <- wilcox.test(group1, group2, correct=T))
+          print(p.wilcox <- result_wilcox[["p.value"]])
+          cat("Done - wilcox.test:", i, "~", g, "\n ")
+        } else if (length(unique(group_types))>2) {
+          print("groups number greater than to 2 - kruskal.test")
+          result_kruskal <- kruskal.test(measure_values ~ group_types)
+          (p.kruskal <- result_kruskal[["p.value"]])
+          print(p.kruskal)
+          # kruskal.test, Null hypothesis that the mean ranks of the groups are the same
+          # if p < 0.05, reject Null hypothesis, 
+          # H1: mean ranks of the groups are different 
+          if (p.kruskal < 0.05) {
+            print("groups number greater than to 2 - kruskal.test & dunn.test")
+            (dunn_result <- dunn.test::dunn.test(measure_values, g = group_types, method = "holm", altp=T))
+            cat("Done - kruskal.test & dunn.test:", i, "~", g, "\n ")
+          } else {
+            cat("Done - kruskal.test:", i, "~", g, "\n ")
+          }
+        }
+      }
+    }
+  }
+}
+
+```
+
+# 5 Evaluate the conservation effectiveness of existing PAs
+
+```{r}
+
+path_RData <- paste0(out_path,"result_3_conservation_effectiveness_existingPAs/RData_two_measures_per_PA.RData")
+load(path_RData)
+
+### Type ###
+group_colnames <- colnames(Measure_1)[which(grepl("^panda$|^type$", colnames(Measure_1)))]
+# Fig.4d-g 
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Endemic", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Endemic", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S10 a-d
+measure_colnames <- colnames(Measure_1)[which(grepl("all_NaPro", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_NaPro", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S11 a-d
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Threatened", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Threatened", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+
+### Level ###
+group_colnames <- colnames(Measure_1)[which(grepl("level", colnames(Measure_1)))]
+# Fig.S10 e-h
+measure_colnames <- colnames(Measure_1)[which(grepl("all_NaPro", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_NaPro", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S11 e-h
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Threatened", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Threatened", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S12 a-d
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Endemic", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Endemic", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+
+
+### Category ###
+group_colnames <- colnames(Measure_1)[which(grepl("category", colnames(Measure_1)))]
+# Fig.S10 i-l
+measure_colnames <- colnames(Measure_1)[which(grepl("all_NaPro", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_NaPro", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S11 i-l
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Threatened", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Threatened", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+# Fig.S12 e-h
+measure_colnames <- colnames(Measure_1)[which(grepl("all_Endemic", colnames(Measure_1)))]
+PAs_effectiveness(Measure_1, measure_colnames, group_colnames)
+measure_colnames <- colnames(Measure_2)[which(grepl("all_Endemic", colnames(Measure_2)))]
+PAs_effectiveness(Measure_2, measure_colnames, group_colnames)
+
+```
